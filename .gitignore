@@ -1,0 +1,10 @@
+# Build artifacts & local secrets
+dist/
+build/
+*.apk
+*.jks
+toolchain.path
+tests/ui/output/
+tests/ui/.cache/
+.gradle/
+local.properties

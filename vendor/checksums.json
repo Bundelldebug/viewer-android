@@ -1,0 +1,42 @@
+[
+  {
+    "file": "annotation-1.3.0.jar",
+    "sha256": "97DC45AFEFE3A1E421DA42B8B6E9F90491477C45FC6178203E3A5E8A05EE8553",
+    "bytes": 31705
+  },
+  {
+    "file": "bcpkix-jdk15to18-1.72.jar",
+    "sha256": "D9B97477B72499BCEE02F5A906510810257FF36A94BF69FBCA0B1E65E7FFDB6E",
+    "bytes": 1022720
+  },
+  {
+    "file": "bcprov-jdk15to18-1.72.jar",
+    "sha256": "EA66EA8A450810B2193E8BF9A7AD3E46307C9896224C0F407D1B7D96BA1221CC",
+    "bytes": 9342484
+  },
+  {
+    "file": "bcutil-jdk15to18-1.72.jar",
+    "sha256": "D92184BDEB3105A11AD9E36ACBD66B5F8EED091B08B9C8F3E2549E42B7F131F1",
+    "bytes": 677620
+  },
+  {
+    "file": "eng.traineddata",
+    "sha256": "7D4322BD2A7749724879683FC3912CB542F19906C83BCC1A52132556427170B2",
+    "bytes": 4113088
+  },
+  {
+    "file": "kor.traineddata",
+    "sha256": "6B85E11D9BBF07863B97B3523B1B112844C43E713DF8B66418A081FD1060B3B2",
+    "bytes": 1677415
+  },
+  {
+    "file": "pdfbox-android-2.0.27.0.aar",
+    "sha256": "30277F879CFD571DB2A137582C95516A0D4EA6778E945519BC58CA93D57D88C7",
+    "bytes": 3254019
+  },
+  {
+    "file": "tesseract4android-4.9.0.aar",
+    "sha256": "BCE5D6413A1A5AE3D7240033FBBC851BA3217D0A08D9769400E17A077F42CB2A",
+    "bytes": 12848454
+  }
+]

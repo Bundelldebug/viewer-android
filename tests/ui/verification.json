@@ -1,0 +1,22 @@
+﻿{
+    "version":  "9.5 Book 2.0.9",
+    "appName":  "酉곗뼱",
+    "nativeGraphics":  true,
+    "androidApi":  34,
+    "physicalDevice":  false,
+    "tests":  18,
+    "passed":  true,
+    "checkedAt":  "2026-11-16T20:17:29.1559555+09:00",
+    "screenshots":  [
+                        "editor-320.png",
+                        "editor-840.png",
+                        "fold-hinge.png",
+                        "phone-1080x2400.png",
+                        "phone-360.png",
+                        "phone-dark-large-text.png",
+                        "phone-drop.png",
+                        "phone-image.png",
+                        "workspace-800x360.png",
+                        "workspace-840x980.png"
+                    ]
+}

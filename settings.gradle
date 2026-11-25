@@ -1,0 +1,2 @@
+rootProject.name = "SamsungViewer"
+include ':app'

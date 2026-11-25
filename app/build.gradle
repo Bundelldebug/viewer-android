@@ -1,0 +1,32 @@
+plugins {
+    id 'com.android.application'
+}
+
+dependencies {
+    implementation files('../vendor/pdfbox-android-2.0.27.0.aar', '../vendor/tesseract4android-4.9.0.aar')
+    implementation fileTree(dir: '../vendor', include: ['*.jar'])
+}
+// The supported release pipeline is ../build.ps1; it also stages OCR models and PDFBox assets.
+
+android {
+    namespace 'com.samsung.oneui.viewer'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.samsung.oneui.viewer"
+        minSdk 26
+        targetSdk 35
+        versionCode 209
+        versionName "9.5 Book 2.0.9"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}

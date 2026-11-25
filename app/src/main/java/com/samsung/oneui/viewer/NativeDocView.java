@@ -12,6 +12,8 @@ import android.text.SpannableStringBuilder;
 import android.text.TextWatcher;
 import android.text.style.BackgroundColorSpan;
 import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.StrikethroughSpan;
 import android.text.style.StyleSpan;
 import android.text.style.UnderlineSpan;
 import android.util.TypedValue;
@@ -20,6 +22,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.GridLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -685,71 +688,106 @@ public final class NativeDocView extends FrameLayout {
 
     private void populateRichHtmlBlocks(LinearLayout parent, String htmlChunk, boolean createUnits, int[] unitCursor,
                                         int textPrimary, int textSecondary) {
-        Pattern tokenPattern = Pattern.compile(
-                "(<table[^>]*>.*?</table>)|(<img[^>]*src=\"data:image/[^\"]+;base64,([^\"]+)\"[^>]*>)|(<(h1|h2|h3|p|div)([^>]*)>(.*?)</\\5>)",
-                Pattern.DOTALL
-        );
-        Matcher m = tokenPattern.matcher(htmlChunk);
+        if (htmlChunk == null || htmlChunk.isEmpty()) return;
+        // Strip outer wrapper <div class="docx ...">...</div> once so nested hwp-box/hwp-hf divs parse cleanly
+        String trimmed = htmlChunk.trim();
+        if (trimmed.startsWith("<div class=\"docx") && trimmed.endsWith("</div>")) {
+            int gt = trimmed.indexOf('>');
+            if (gt > 0 && gt < trimmed.length() - 6) {
+                trimmed = trimmed.substring(gt + 1, trimmed.length() - 6);
+            }
+        }
+
+        int pos = 0;
+        int len = trimmed.length();
         boolean foundAny = false;
-        while (m.find()) {
-            foundAny = true;
-            if (m.group(1) != null) {
-                // Table block
-                View tbl = buildTableFromHtml(m.group(1), false, createUnits, unitCursor, textPrimary, textSecondary);
+        while (pos < len) {
+            int lt = trimmed.indexOf('<', pos);
+            if (lt < 0) break;
+            if (lt > pos) {
+                String stray = unescapeHtml(trimmed.substring(pos, lt)).trim();
+                if (!stray.isEmpty()) {
+                    foundAny = true;
+                    UnitView uv = obtainOrCreateUnit("", stray, false, false, createUnits, unitCursor);
+                    TextView tv = createBoundTextOrEdit(uv, textPrimary, false);
+                    parent.addView(tv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                }
+            }
+            int gt = trimmed.indexOf('>', lt);
+            if (gt < 0) break;
+            String openTag = trimmed.substring(lt, gt + 1);
+            String openLower = openTag.toLowerCase(Locale.ROOT);
+
+            if (openLower.startsWith("<hr")) {
+                foundAny = true;
+                View sep = new View(getContext());
+                sep.setBackgroundColor(isDarkTheme ? 0x33FFFFFF : 0x26000000);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+                lp.topMargin = dp(12);
+                lp.bottomMargin = dp(12);
+                parent.addView(sep, lp);
+                pos = gt + 1;
+            } else if (openLower.startsWith("<img")) {
+                foundAny = true;
+                addImageFromTag(parent, openTag);
+                pos = gt + 1;
+            } else if (openLower.startsWith("<table")) {
+                int end = findMatchingClose(trimmed, gt + 1, "table");
+                String block = trimmed.substring(lt, end);
+                foundAny = true;
+                View tbl = buildTableFromHtml(block, false, createUnits, unitCursor, textPrimary, textSecondary);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.topMargin = dp(8);
                 lp.bottomMargin = dp(10);
                 parent.addView(tbl, lp);
-            } else if (m.group(2) != null) {
-                // Embedded Base64 Image
-                String b64 = m.group(3);
-                try {
-                    byte[] bytes = Util.b64Decode(b64);
-                    Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                    if (bmp != null) {
-                        ImageView iv = new ImageView(getContext());
-                        iv.setAdjustViewBounds(true);
-                        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                        iv.setImageBitmap(bmp);
-                        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                        lp.topMargin = dp(8);
-                        lp.bottomMargin = dp(8);
-                        parent.addView(iv, lp);
+                pos = end;
+            } else if (openLower.startsWith("<div")) {
+                int end = findMatchingClose(trimmed, gt + 1, "div");
+                String inner = extractInnerHtml(trimmed, gt + 1, end, "div");
+                String attrs = openTag.substring(4, openTag.length() - 1);
+                String cls = extractAttr(attrs, "class");
+                String style = extractAttr(attrs, "style");
+                foundAny = true;
+                if (cls.contains("hwp-box") || cls.contains("hwp-hf")) {
+                    LinearLayout box = new LinearLayout(getContext());
+                    box.setOrientation(LinearLayout.VERTICAL);
+                    box.setPadding(dp(12), dp(9), dp(12), dp(9));
+                    GradientDrawable gd = new GradientDrawable();
+                    gd.setCornerRadius(dp(8));
+                    Integer bg = parseCssColor(style, "background-color");
+                    if (bg == null) bg = parseCssColor(style, "background");
+                    if (bg != null) gd.setColor(adaptBgForTheme(bg));
+                    else if (cls.contains("hwp-hf")) gd.setColor(isDarkTheme ? 0xFF202530 : 0xFFF5F7FB);
+                    else gd.setColor(isDarkTheme ? 0xFF1D222D : 0xFFFAFCFF);
+                    Integer bd = parseBorderColor(style);
+                    if (!style.contains("border:none")) {
+                        gd.setStroke(Math.max(1, dp(1)), bd != null ? bd : (isDarkTheme ? 0xFF3A4254 : 0xFFCBD5E1));
                     }
-                } catch (Exception ignored) {}
-            } else if (m.group(4) != null) {
-                String tag = m.group(5);
-                String attrs = m.group(6) != null ? m.group(6) : "";
-                String inner = m.group(7) != null ? m.group(7) : "";
-                if (inner.contains("<p") || inner.contains("<table") || inner.contains("<h1") || inner.contains("<h2")) {
+                    box.setBackground(gd);
+                    populateRichHtmlBlocks(box, inner, createUnits, unitCursor, textPrimary, textSecondary);
+                    LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    blp.topMargin = dp(6);
+                    blp.bottomMargin = dp(8);
+                    parent.addView(box, blp);
+                } else {
                     populateRichHtmlBlocks(parent, inner, createUnits, unitCursor, textPrimary, textSecondary);
-                    continue;
                 }
-                String dataK = extractAttr(attrs, "data-k");
-                String plain = unescapeHtml(stripTagsPreserveNewlines(inner)).trim();
-                if (plain.isEmpty() && dataK.isEmpty()) continue;
-
-                boolean isHeading = "h1".equalsIgnoreCase(tag) || "h2".equalsIgnoreCase(tag) || "h3".equalsIgnoreCase(tag);
-                UnitView uv = obtainOrCreateUnit(dataK, plain, false, isHeading, createUnits, unitCursor);
-                TextView tv = createBoundTextOrEdit(uv, textPrimary, false);
-                if ("h1".equalsIgnoreCase(tag)) {
-                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f * zoomScale);
-                    tv.setTypeface(Typeface.DEFAULT_BOLD);
-                } else if ("h2".equalsIgnoreCase(tag)) {
-                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17.5f * zoomScale);
-                    tv.setTypeface(Typeface.DEFAULT_BOLD);
-                } else if ("h3".equalsIgnoreCase(tag)) {
-                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f * zoomScale);
-                    tv.setTypeface(Typeface.DEFAULT_BOLD);
-                }
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.bottomMargin = dp(isHeading ? 10 : 6);
-                parent.addView(tv, lp);
+                pos = end;
+            } else if (openLower.startsWith("<p") || openLower.startsWith("<h1") || openLower.startsWith("<h2") || openLower.startsWith("<h3")) {
+                String tag = openLower.startsWith("<h1") ? "h1" : (openLower.startsWith("<h2") ? "h2" : (openLower.startsWith("<h3") ? "h3" : "p"));
+                int end = findMatchingClose(trimmed, gt + 1, tag);
+                String inner = extractInnerHtml(trimmed, gt + 1, end, tag);
+                String attrs = openTag.substring(1 + tag.length(), openTag.length() - 1);
+                foundAny = true;
+                renderParagraphOrHeading(parent, tag, attrs, inner, createUnits, unitCursor, textPrimary, textSecondary);
+                pos = end;
+            } else {
+                pos = gt + 1;
             }
         }
 
         if (!foundAny) {
-            String fallback = unescapeHtml(stripTagsPreserveNewlines(htmlChunk)).trim();
+            String fallback = unescapeHtml(stripTagsPreserveNewlines(trimmed)).trim();
             if (!fallback.isEmpty()) {
                 UnitView uv = obtainOrCreateUnit("t", fallback, false, false, createUnits, unitCursor);
                 TextView tv = createBoundTextOrEdit(uv, textPrimary, true);
@@ -758,8 +796,280 @@ public final class NativeDocView extends FrameLayout {
         }
     }
 
+    private void renderParagraphOrHeading(LinearLayout parent, String tag, String attrs, String inner,
+                                          boolean createUnits, int[] unitCursor, int textPrimary, int textSecondary) {
+        // Render any <img> embedded inside <p> so images are never stripped!
+        if (inner.contains("<img")) {
+            Matcher im = Pattern.compile("<img[^>]*>", Pattern.CASE_INSENSITIVE).matcher(inner);
+            while (im.find()) addImageFromTag(parent, im.group());
+            inner = im.replaceAll("");
+        }
+        String dataK = extractAttr(attrs, "data-k");
+        String style = extractAttr(attrs, "style");
+        String plain = unescapeHtml(stripTagsPreserveNewlines(inner)).trim();
+        if (plain.isEmpty() && dataK.isEmpty()) {
+            // Preserve intentional blank paragraph spacing lightly
+            if (attrs.contains("empty")) {
+                View sp = new View(getContext());
+                parent.addView(sp, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)));
+            }
+            return;
+        }
+
+        boolean isHeading = "h1".equalsIgnoreCase(tag) || "h2".equalsIgnoreCase(tag) || "h3".equalsIgnoreCase(tag);
+        UnitView uv = obtainOrCreateUnit(dataK, plain, false, isHeading, createUnits, unitCursor);
+        TextView tv = createBoundTextOrEdit(uv, textPrimary, false);
+        if (!isEditing) {
+            CharSequence styled = parseInlineStyledText(inner, textPrimary);
+            if (styled.length() > 0) tv.setText(styled);
+        }
+        if ("h1".equalsIgnoreCase(tag)) {
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f * zoomScale);
+            tv.setTypeface(Typeface.DEFAULT_BOLD);
+        } else if ("h2".equalsIgnoreCase(tag)) {
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17.5f * zoomScale);
+            tv.setTypeface(Typeface.DEFAULT_BOLD);
+        } else if ("h3".equalsIgnoreCase(tag)) {
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f * zoomScale);
+            tv.setTypeface(Typeface.DEFAULT_BOLD);
+        }
+        String align = parseCssProp(style, "text-align");
+        if ("center".equalsIgnoreCase(align)) tv.setGravity(Gravity.CENTER_HORIZONTAL);
+        else if ("right".equalsIgnoreCase(align)) tv.setGravity(Gravity.END);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        float mt = parseCssPt(style, "margin-top");
+        float mb = parseCssPt(style, "margin-bottom");
+        float ml = parseCssPt(style, "margin-left");
+        lp.topMargin = mt > 0 ? dp((int) Math.min(28, mt)) : 0;
+        lp.bottomMargin = mb > 0 ? dp((int) Math.min(28, mb)) : dp(isHeading ? 10 : 6);
+        lp.leftMargin = ml > 0 ? dp((int) Math.min(48, ml)) : 0;
+        parent.addView(tv, lp);
+    }
+
+    private void addImageFromTag(LinearLayout parent, String imgTag) {
+        Matcher m = Pattern.compile("src=\"data:image/[^\"]+;base64,([^\"]+)\"", Pattern.CASE_INSENSITIVE).matcher(imgTag);
+        if (!m.find()) return;
+        try {
+            byte[] bytes = Util.b64Decode(m.group(1));
+            Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bmp == null) return;
+            ImageView iv = new ImageView(getContext());
+            iv.setAdjustViewBounds(true);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setImageBitmap(bmp);
+            String style = extractAttr(imgTag, "style");
+            int wPx = parseCssPx(style, "width");
+            int targetW = wPx > 24 ? Math.min(dp(wPx), ViewGroup.LayoutParams.MATCH_PARENT) : ViewGroup.LayoutParams.MATCH_PARENT;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    wPx > 24 ? dp(Math.min(wPx, 340)) : ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.gravity = Gravity.CENTER_HORIZONTAL;
+            lp.topMargin = dp(6);
+            lp.bottomMargin = dp(8);
+            parent.addView(iv, lp);
+        } catch (Throwable ignored) {}
+    }
+
+    private CharSequence parseInlineStyledText(String html, int defaultColor) {
+        SpannableStringBuilder ssb = new SpannableStringBuilder();
+        if (html == null || html.isEmpty()) return ssb;
+        // Walk tags cleanly: <span style="...">, <b>, <strong>, <i>, <em>, <u>, <s>, <br>
+        Pattern p = Pattern.compile("(<br\\s*/?>)|(</?(?:span|b|strong|i|em|u|s|del)[^>]*>)", Pattern.CASE_INSENSITIVE);
+        Matcher m = p.matcher(html);
+        List<int[]> styleStarts = new ArrayList<>();
+        List<String> styleSpecs = new ArrayList<>();
+        int last = 0;
+        while (m.find()) {
+            if (m.start() > last) {
+                ssb.append(unescapeHtml(stripTags(html.substring(last, m.start()))));
+            }
+            if (m.group(1) != null) {
+                ssb.append('\n');
+            } else {
+                String tok = m.group(2);
+                String tl = tok.toLowerCase(Locale.ROOT);
+                if (tl.startsWith("</")) {
+                    if (!styleStarts.isEmpty()) {
+                        int st = styleStarts.remove(styleStarts.size() - 1)[0];
+                        String spec = styleSpecs.remove(styleSpecs.size() - 1);
+                        applyInlineSpec(ssb, st, ssb.length(), spec, defaultColor);
+                    }
+                } else {
+                    String spec = "";
+                    if (tl.startsWith("<b") || tl.startsWith("<strong")) spec = "font-weight:bold;";
+                    else if (tl.startsWith("<i") || tl.startsWith("<em")) spec = "font-style:italic;";
+                    else if (tl.startsWith("<u")) spec = "text-decoration:underline;";
+                    else if (tl.startsWith("<s") || tl.startsWith("<del")) spec = "text-decoration:line-through;";
+                    else if (tl.startsWith("<span")) spec = extractAttr(tok, "style");
+                    styleStarts.add(new int[]{ssb.length()});
+                    styleSpecs.add(spec);
+                }
+            }
+            last = m.end();
+        }
+        if (last < html.length()) {
+            ssb.append(unescapeHtml(stripTags(html.substring(last))));
+        }
+        while (!styleStarts.isEmpty()) {
+            int st = styleStarts.remove(styleStarts.size() - 1)[0];
+            String spec = styleSpecs.remove(styleSpecs.size() - 1);
+            applyInlineSpec(ssb, st, ssb.length(), spec, defaultColor);
+        }
+        return ssb;
+    }
+
+    private void applyInlineSpec(SpannableStringBuilder ssb, int start, int end, String css, int defaultColor) {
+        if (end <= start || css == null || css.isEmpty()) return;
+        String low = css.toLowerCase(Locale.ROOT);
+        boolean bold = low.contains("font-weight:bold") || low.contains("font-weight:700") || low.contains("font-weight:600");
+        boolean italic = low.contains("font-style:italic");
+        if (bold && italic) ssb.setSpan(new StyleSpan(Typeface.BOLD_ITALIC), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        else if (bold) ssb.setSpan(new StyleSpan(Typeface.BOLD), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        else if (italic) ssb.setSpan(new StyleSpan(Typeface.ITALIC), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (low.contains("underline")) ssb.setSpan(new UnderlineSpan(), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (low.contains("line-through")) ssb.setSpan(new StrikethroughSpan(), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+
+        float pt = parseCssPt(css, "font-size");
+        if (pt > 0f) {
+            float rel = Math.max(0.65f, Math.min(2.4f, pt / 10.5f));
+            if (Math.abs(rel - 1f) > 0.06f) {
+                ssb.setSpan(new RelativeSizeSpan(rel), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+        }
+        Integer fg = parseCssColor(css, "color");
+        if (fg != null) {
+            int c = fg;
+            if (isDarkTheme && Color.red(c) < 60 && Color.green(c) < 60 && Color.blue(c) < 60) c = defaultColor;
+            ssb.setSpan(new ForegroundColorSpan(c), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        Integer bg = parseCssColor(css, "background-color");
+        if (bg == null) bg = parseCssColor(css, "background");
+        if (bg != null) {
+            ssb.setSpan(new BackgroundColorSpan(adaptBgForTheme(bg)), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+    }
+
     private View buildTableFromHtml(String tableHtml, boolean isSpreadsheet, boolean createUnits, int[] unitCursor,
                                     int textPrimary, int textSecondary) {
+        if (isSpreadsheet) {
+            return buildSpreadsheetTable(tableHtml, createUnits, unitCursor, textPrimary, textSecondary);
+        }
+        return buildRichGridTable(tableHtml, createUnits, unitCursor, textPrimary, textSecondary);
+    }
+
+    private static final class ParsedCell {
+        int row, col, rowSpan, colSpan;
+        boolean isHeader;
+        String attrs, inner;
+    }
+
+    /** Span-aware rich table renderer supporting colspan, rowspan, cell fills, borders, and nested images/styled text. */
+    private View buildRichGridTable(String tableHtml, boolean createUnits, int[] unitCursor,
+                                    int textPrimary, int textSecondary) {
+        List<ParsedCell> cells = new ArrayList<>();
+        List<boolean[]> occupied = new ArrayList<>();
+        int maxCols = 1;
+        int rIdx = 0;
+
+        // Extract top-level <tr> elements (avoid matching nested table rows)
+        List<String> rows = extractTopLevelTags(tableHtml, "tr");
+        for (String rowHtml : rows) {
+            while (occupied.size() <= rIdx) occupied.add(new boolean[64]);
+            List<String> cellTags = extractTopLevelCells(rowHtml);
+            int cCursor = 0;
+            for (String cellFull : cellTags) {
+                while (cCursor < 64 && occupied.get(rIdx)[cCursor]) cCursor++;
+                int gt = cellFull.indexOf('>');
+                if (gt < 0) continue;
+                String open = cellFull.substring(0, gt + 1);
+                boolean isTh = open.toLowerCase(Locale.ROOT).startsWith("<th");
+                String attrs = open.substring(3, open.length() - 1);
+                int closeIdx = cellFull.lastIndexOf("</");
+                String inner = closeIdx > gt ? cellFull.substring(gt + 1, closeIdx) : "";
+                int cs = Math.max(1, Math.min(20, parseIntAttr(attrs, "colspan", 1)));
+                int rs = Math.max(1, Math.min(30, parseIntAttr(attrs, "rowspan", 1)));
+
+                ParsedCell pc = new ParsedCell();
+                pc.row = rIdx; pc.col = cCursor; pc.colSpan = cs; pc.rowSpan = rs;
+                pc.isHeader = isTh; pc.attrs = attrs; pc.inner = inner;
+                cells.add(pc);
+
+                for (int rr = rIdx; rr < rIdx + rs; rr++) {
+                    while (occupied.size() <= rr) occupied.add(new boolean[64]);
+                    for (int cc = cCursor; cc < Math.min(64, cCursor + cs); cc++) occupied.get(rr)[cc] = true;
+                }
+                if (cCursor + cs > maxCols) maxCols = cCursor + cs;
+                cCursor += cs;
+            }
+            rIdx++;
+        }
+
+        if (cells.isEmpty()) return new View(getContext());
+
+        HorizontalScrollView hScroll = new HorizontalScrollView(getContext());
+        hScroll.setFillViewport(true);
+
+        GridLayout grid = new GridLayout(getContext());
+        grid.setColumnCount(maxCols);
+        grid.setRowCount(Math.max(1, rIdx));
+
+        int defBorder = isDarkTheme ? 0xFF333B4C : 0xFFCBD5E1;
+        int defHeaderBg = isDarkTheme ? 0xFF252B38 : 0xFFEEF2F8;
+        int defCellBg = isDarkTheme ? 0xFF1A1E27 : 0xFFFFFFFF;
+        boolean tableBorderless = tableHtml.substring(0, Math.min(tableHtml.length(), 180)).contains("border:none");
+
+        for (ParsedCell pc : cells) {
+            String style = extractAttr(pc.attrs, "style");
+            String dataK = extractAttr(pc.attrs, "data-k");
+            boolean noBorder = tableBorderless || style.contains("border:none");
+            Integer bg = parseCssColor(style, "background-color");
+            if (bg == null) bg = parseCssColor(style, "background");
+            Integer bd = parseBorderColor(style);
+
+            int cellFill = bg != null ? adaptBgForTheme(bg) : (pc.isHeader ? defHeaderBg : defCellBg);
+            int cellTextCol = (bg != null && !isDarkTheme && isDarkColor(cellFill)) ? 0xFFFFFFFF : textPrimary;
+
+            LinearLayout cellBox = new LinearLayout(getContext());
+            cellBox.setOrientation(LinearLayout.VERTICAL);
+            cellBox.setPadding(dp(8), dp(6), dp(8), dp(6));
+            cellBox.setMinimumWidth(dp(maxCols <= 4 ? 72 : 56));
+            GradientDrawable gd = new GradientDrawable();
+            gd.setColor(cellFill);
+            if (!noBorder) gd.setStroke(1, bd != null ? bd : defBorder);
+            cellBox.setBackground(gd);
+
+            boolean hasNestedBlocks = pc.inner.contains("<p") || pc.inner.contains("<img")
+                    || pc.inner.contains("<table") || pc.inner.contains("<div");
+            if (hasNestedBlocks && dataK.isEmpty()) {
+                populateRichHtmlBlocks(cellBox, pc.inner, createUnits, unitCursor, cellTextCol, textSecondary);
+            } else {
+                String plain = unescapeHtml(stripTagsPreserveNewlines(pc.inner)).trim();
+                UnitView uv = obtainOrCreateUnit(dataK, plain, true, pc.isHeader, createUnits, unitCursor);
+                TextView tv = createBoundTextOrEdit(uv, cellTextCol, false);
+                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * zoomScale);
+                if (!isEditing) {
+                    CharSequence styled = parseInlineStyledText(pc.inner, cellTextCol);
+                    if (styled.length() > 0) tv.setText(styled);
+                }
+                if (pc.isHeader) tv.setTypeface(Typeface.DEFAULT_BOLD);
+                cellBox.addView(tv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+
+            GridLayout.LayoutParams glp = new GridLayout.LayoutParams(
+                    GridLayout.spec(pc.row, pc.rowSpan, GridLayout.FILL),
+                    GridLayout.spec(pc.col, pc.colSpan, GridLayout.FILL, (float) pc.colSpan));
+            glp.width = 0;
+            glp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            grid.addView(cellBox, glp);
+        }
+
+        hScroll.addView(grid, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return hScroll;
+    }
+
+    private View buildSpreadsheetTable(String tableHtml, boolean createUnits, int[] unitCursor,
+                                       int textPrimary, int textSecondary) {
         HorizontalScrollView hScroll = new HorizontalScrollView(getContext());
         hScroll.setFillViewport(true);
 
@@ -770,7 +1080,6 @@ public final class NativeDocView extends FrameLayout {
         int cellBg = isDarkTheme ? 0xFF1A1D24 : 0xFFFFFFFF;
 
         Matcher rowMatcher = Pattern.compile("<tr[^>]*>(.*?)</tr>", Pattern.DOTALL).matcher(tableHtml);
-        int rIdx = 0;
         while (rowMatcher.find()) {
             String rowInner = rowMatcher.group(1);
             TableRow tr = new TableRow(getContext());
@@ -780,7 +1089,7 @@ public final class NativeDocView extends FrameLayout {
                 String tag = cellMatcher.group(1);
                 String attrs = cellMatcher.group(2) != null ? cellMatcher.group(2) : "";
                 String inner = cellMatcher.group(3) != null ? cellMatcher.group(3) : "";
-                boolean isHeader = "th".equalsIgnoreCase(tag) || (rIdx == 0 && !isSpreadsheet);
+                boolean isHeader = "th".equalsIgnoreCase(tag);
                 String dataK = extractAttr(attrs, "data-k");
                 String text = unescapeHtml(stripTagsPreserveNewlines(inner));
 
@@ -799,7 +1108,7 @@ public final class NativeDocView extends FrameLayout {
                     if (isHeader) cellView.setTypeface(Typeface.DEFAULT_BOLD);
                 }
                 cellView.setPadding(dp(10), dp(7), dp(10), dp(7));
-                cellView.setMinimumWidth(dp(isSpreadsheet && cIdx == 0 && dataK.isEmpty() ? 38 : 84));
+                cellView.setMinimumWidth(dp(cIdx == 0 && dataK.isEmpty() ? 38 : 84));
 
                 GradientDrawable cellDrawable = new GradientDrawable();
                 cellDrawable.setColor(isHeader ? headerBg : cellBg);
@@ -811,10 +1120,148 @@ public final class NativeDocView extends FrameLayout {
                 cIdx++;
             }
             table.addView(tr);
-            rIdx++;
         }
         hScroll.addView(table);
         return hScroll;
+    }
+
+    private static int findMatchingClose(String html, int afterOpen, String tag) {
+        String low = html.toLowerCase(Locale.ROOT);
+        String openPrefix = "<" + tag;
+        String closeTag = "</" + tag + ">";
+        int depth = 1;
+        int pos = afterOpen;
+        while (pos < low.length() && depth > 0) {
+            int nextOpen = low.indexOf(openPrefix, pos);
+            int nextClose = low.indexOf(closeTag, pos);
+            if (nextClose < 0) return html.length();
+            if (nextOpen >= 0 && nextOpen < nextClose) {
+                int afterCharIdx = nextOpen + openPrefix.length();
+                char nc = afterCharIdx < low.length() ? low.charAt(afterCharIdx) : '>';
+                if (nc == '>' || nc == ' ' || nc == '\t' || nc == '\n') depth++;
+                pos = afterCharIdx;
+            } else {
+                depth--;
+                pos = nextClose + closeTag.length();
+            }
+        }
+        return pos;
+    }
+
+    private static String extractInnerHtml(String html, int start, int endWithClose, String tag) {
+        String closeTag = "</" + tag + ">";
+        int end = endWithClose;
+        if (end >= closeTag.length() && html.substring(end - closeTag.length(), end).equalsIgnoreCase(closeTag)) {
+            end -= closeTag.length();
+        }
+        return end > start ? html.substring(start, end) : "";
+    }
+
+    private static List<String> extractTopLevelTags(String html, String tag) {
+        List<String> out = new ArrayList<>();
+        int gt0 = html.indexOf('>');
+        if (gt0 < 0) return out;
+        String body = extractInnerHtml(html, gt0 + 1, html.length(), "table");
+        String low = body.toLowerCase(Locale.ROOT);
+        int pos = 0;
+        while (pos < body.length()) {
+            int idx = low.indexOf("<" + tag, pos);
+            if (idx < 0) break;
+            int gt = body.indexOf('>', idx);
+            if (gt < 0) break;
+            int end = findMatchingClose(body, gt + 1, tag);
+            out.add(body.substring(idx, end));
+            pos = end;
+        }
+        return out;
+    }
+
+    private static List<String> extractTopLevelCells(String rowHtml) {
+        List<String> out = new ArrayList<>();
+        int gt0 = rowHtml.indexOf('>');
+        if (gt0 < 0) return out;
+        String body = extractInnerHtml(rowHtml, gt0 + 1, rowHtml.length(), "tr");
+        String low = body.toLowerCase(Locale.ROOT);
+        int pos = 0;
+        while (pos < body.length()) {
+            int iTd = low.indexOf("<td", pos);
+            int iTh = low.indexOf("<th", pos);
+            int idx;
+            String tag;
+            if (iTd >= 0 && (iTh < 0 || iTd < iTh)) { idx = iTd; tag = "td"; }
+            else if (iTh >= 0) { idx = iTh; tag = "th"; }
+            else break;
+            int gt = body.indexOf('>', idx);
+            if (gt < 0) break;
+            int end = findMatchingClose(body, gt + 1, tag);
+            out.add(body.substring(idx, end));
+            pos = end;
+        }
+        return out;
+    }
+
+    private int adaptBgForTheme(int col) {
+        if (!isDarkTheme) return col;
+        // Soften bright pastel template fills in dark mode so white text stays legible
+        int r = Color.red(col), g = Color.green(col), b = Color.blue(col);
+        if (r + g + b > 520) {
+            return Color.rgb(Math.max(28, r / 5), Math.max(32, g / 5), Math.max(40, b / 5));
+        }
+        return col;
+    }
+
+    private static boolean isDarkColor(int c) {
+        return (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000 < 120;
+    }
+
+    private static int parseIntAttr(String attrs, String name, int def) {
+        String v = extractAttr(attrs, name);
+        if (v.isEmpty()) return def;
+        try { return Integer.parseInt(v.trim()); } catch (Exception e) { return def; }
+    }
+
+    private static String parseCssProp(String css, String prop) {
+        if (css == null || css.isEmpty()) return "";
+        Matcher m = Pattern.compile("(?i)(?:^|;)\\s*" + Pattern.quote(prop) + "\\s*:\\s*([^;]+)").matcher(css);
+        return m.find() ? m.group(1).trim() : "";
+    }
+
+    private static Integer parseCssColor(String css, String prop) {
+        String v = parseCssProp(css, prop);
+        if (v.isEmpty()) return null;
+        Matcher hm = Pattern.compile("#[0-9a-fA-F]{6}").matcher(v);
+        if (hm.find()) {
+            try { return Color.parseColor(hm.group()); } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private static Integer parseBorderColor(String css) {
+        String v = parseCssProp(css, "border");
+        if (v.isEmpty() || "none".equalsIgnoreCase(v)) return null;
+        Matcher hm = Pattern.compile("#[0-9a-fA-F]{6}").matcher(v);
+        if (hm.find()) {
+            try { return Color.parseColor(hm.group()); } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private static float parseCssPt(String css, String prop) {
+        String v = parseCssProp(css, prop);
+        Matcher m = Pattern.compile("([0-9]+(?:\\.[0-9]+)?)\\s*pt", Pattern.CASE_INSENSITIVE).matcher(v);
+        if (m.find()) {
+            try { return Float.parseFloat(m.group(1)); } catch (Exception ignored) {}
+        }
+        return 0f;
+    }
+
+    private static int parseCssPx(String css, String prop) {
+        String v = parseCssProp(css, prop);
+        Matcher m = Pattern.compile("([0-9]+)\\s*px", Pattern.CASE_INSENSITIVE).matcher(v);
+        if (m.find()) {
+            try { return Integer.parseInt(m.group(1)); } catch (Exception ignored) {}
+        }
+        return 0;
     }
 
     private UnitView obtainOrCreateUnit(String dataK, String text, boolean isCell, boolean isHeading, boolean createUnits, int[] cursor) {

@@ -606,15 +606,17 @@ final class Dock extends FrameLayout {
 
         // Refracting & magnifying liquid lens floating on top of contentNode!
         lensGlass.shapes(lens, Math.min(lens.width(), lens.height()) / 2f, null, 0, null, 0);
-        lensGlass.mag = 1f + 0.14f * l;
+        lensGlass.mag = 1f + 0.18f * l;
         lensGlass.magX = lens.centerX();
         lensGlass.magY = lens.centerY();
         lensGlass.alpha = Ui.clamp(l * 1.4f, 0f, 1f);
-        lensGlass.refractDp = 22f;
-        lensGlass.edgeDp = 26f;
-        lensGlass.outerDp = 7f;
-        lensGlass.outerRefractDp = 14f;
-        lensGlass.chroma = 0.9f;
+        lensGlass.refractDp = 16f;
+        lensGlass.edgeDp = 24f;
+        lensGlass.outerDp = 7.5f;
+        lensGlass.outerRefractDp = 13f;
+        lensGlass.depthEffect = 0.65f;
+        lensGlass.innerShadow = l;
+        lensGlass.chroma = 0.95f;
         lensGlass.tint = Ui.dark ? 0x10FFFFFF : 0x0AFFFFFF;
         lensGlass.pressX = touchX; lensGlass.pressY = touchY;
         lensGlass.pressR = Ui.dpf(42);

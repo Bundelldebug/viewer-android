@@ -7,7 +7,7 @@ $JsonJar = Join-Path $ProjectRoot 'tests\vendor\json-20240303.jar'
 $Classes = Join-Path $ProjectRoot 'tests\classes'
 New-Item -ItemType Directory -Force -Path $Classes | Out-Null
 $SourceRoot = Join-Path $ProjectRoot 'app\src\main\java\com\samsung\oneui\viewer'
-$Sources = @('AdaptiveLayout.java','TiffCodec.java','Util.java','Docs.java','DocEdit.java') | ForEach-Object { Join-Path $SourceRoot $_ }
+$Sources = @('AdaptiveLayout.java','TiffCodec.java','Util.java','HwpRich.java','Docs.java','DocEdit.java') | ForEach-Object { Join-Path $SourceRoot $_ }
 $Sources += Join-Path $ProjectRoot 'tests\CoreFixtures.java'
 $Sources += Join-Path $ProjectRoot 'tests\android\util\Base64.java'
 & "$JavaBin\javac.exe" --release 11 -encoding UTF-8 -cp "$AndroidJar;$JsonJar" -d $Classes @Sources

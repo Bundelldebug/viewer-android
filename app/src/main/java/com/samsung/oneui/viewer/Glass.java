@@ -15,27 +15,23 @@ import android.view.View;
 import android.widget.FrameLayout;
 
 /**
- * Liquid Glass renderer ported 1:1 from Prism Music Android:
- * real AGSL bevel refraction, outer lip bend, chromatic dispersion, specular rim,
- * Gaussian touch glow, smooth-union metaball blending, and live backdrop RenderNode mirroring.
- * Safely degrades on API 26–32 while enabling full AGSL Liquid Glass on API 33+.
+ * Optical glass rendering engine inspired by Kyant0/AndroidLiquidGlass and MeiloX.
+ * Combines analytic rounded-rect SDF, spherical {@code circleMap} lens refraction with
+ * {@code depthEffect}, physically weighted 7-band spectral chromatic dispersion,
+ * 45-degree directional rim highlight, vibrancy boost, inner shadow, and smooth-union
+ * metaball morphing ({@code smin}) + touch bloom. Safely degrades on API 26–32.
  */
 final class Glass {
     private Glass() {}
 
     static boolean shadersOk = Build.VERSION.SDK_INT >= 33;
 
-    /**
-     * Exact Prism AGSL Liquid Glass shader:
-     * Up to 3 rounded-rect shapes smooth-unioned together, with bevel refraction, steep outer lip,
-     * chromatic edge dispersion, magnification, specular rim highlight, vibrance boost, and touch glow.
-     */
     static final String SHADER =
             "uniform shader content;\n" +
             "uniform float2 iRes;\n" +
             "uniform float4 s0, s1, s2;\n" +
             "uniform float3 radii;\n" +
-            "uniform float smoothK, refr, edgeW, outerW, outerRefr, chroma, rim, vib;\n" +
+            "uniform float smoothK, refr, edgeW, outerW, outerRefr, chroma, rim, vib, depthEff, innerShad;\n" +
             "uniform float mag;\n" +
             "uniform float2 magCenter;\n" +
             "uniform float4 tint;\n" +
@@ -45,8 +41,20 @@ final class Glass {
             "\n" +
             "float rbox(float2 p, float4 b, float r) {\n" +
             "    if (b.z <= 0.0 || b.w <= 0.0) return 1e5;\n" +
-            "    float2 q = abs(p - b.xy) - b.zw + r;\n" +
-            "    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n" +
+            "    float rr = min(r, min(b.z, b.w));\n" +
+            "    float2 q = abs(p - b.xy) - (b.zw - float2(rr));\n" +
+            "    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - rr;\n" +
+            "}\n" +
+            "float2 gradSdRR(float2 cc, float2 hs, float rad) {\n" +
+            "    float2 corner = abs(cc) - (hs - float2(rad));\n" +
+            "    if (corner.x >= 0.0 || corner.y >= 0.0) {\n" +
+            "        float2 mc = max(corner, float2(0.0));\n" +
+            "        float ml = length(mc);\n" +
+            "        return ml > 1e-4 ? sign(cc) * (mc / ml) : float2(0.0);\n" +
+            "    } else {\n" +
+            "        float gx = step(corner.y, corner.x);\n" +
+            "        return sign(cc) * float2(gx, 1.0 - gx);\n" +
+            "    }\n" +
             "}\n" +
             "float smin(float a, float b, float k) {\n" +
             "    if (k <= 0.001) return min(a, b);\n" +
@@ -59,9 +67,9 @@ final class Glass {
             "    d = smin(d, rbox(p, s2, radii.z), smoothK);\n" +
             "    return d;\n" +
             "}\n" +
-            "float2 grad(float2 p) {\n" +
-            "    float2 e = float2(1.5, 0.0);\n" +
-            "    return float2(sdf(p + e.xy) - sdf(p - e.xy), sdf(p + e.yx) - sdf(p - e.yx));\n" +
+            "float circleMap(float x) {\n" +
+            "    float c = clamp(x, 0.0, 1.0);\n" +
+            "    return 1.0 - sqrt(max(0.0, 1.0 - c * c));\n" +
             "}\n" +
             "half4 sampleC(float2 p) {\n" +
             "    return content.eval(clamp(p, float2(0.5), iRes - float2(0.5)));\n" +
@@ -70,47 +78,76 @@ final class Glass {
             "    float d = sdf(p);\n" +
             "    float mask = clamp(0.5 - d, 0.0, 1.0);\n" +
             "    if (mask <= 0.001) return half4(0.0);\n" +
-            "    float depth = -d;\n" +
-            "    float2 g = grad(p);\n" +
-            "    float gl = length(g);\n" +
-            "    float2 n = gl > 1e-4 ? g / gl : float2(0.0, 1.0);\n" +
-            "    float tIn = clamp(1.0 - depth / max(edgeW, 1.0), 0.0, 1.0);\n" +
-            "    float inner = tIn * tIn * tIn * refr;\n" +
-            "    float tOut = clamp(1.0 - depth / max(outerW, 1.0), 0.0, 1.0);\n" +
-            "    float outer = tOut * tOut * tOut * tOut * outerRefr;\n" +
-            "    float bend = inner + outer;\n" +
-            "    float2 baseP = magCenter + (p - magCenter) / max(mag, 0.01);\n" +
-            "    float2 uv = baseP - n * bend;\n" +
-            "    half3 rgb;\n" +
-            "    if (chroma > 0.01 && tIn > 0.01) {\n" +
-            "        float ca = chroma * (inner * 0.14 + outer * 0.35);\n" +
-            "        rgb = half3(sampleC(uv - n * ca).r, sampleC(uv).g, sampleC(uv + n * ca).b);\n" +
+            "    float depth = max(-d, 0.0);\n" +
+            "    bool single = (s1.z <= 0.5 && s2.z <= 0.5);\n" +
+            "    float2 hs = max(s0.zw, float2(1.0));\n" +
+            "    float2 cc = p - s0.xy;\n" +
+            "    float2 gRim;\n" +
+            "    float2 n;\n" +
+            "    if (single) {\n" +
+            "        float gradR = min(radii.x * 1.5, min(hs.x, hs.y));\n" +
+            "        gRim = gradSdRR(cc, hs, gradR);\n" +
+            "        float cl = length(cc);\n" +
+            "        float2 radial = cl > 1e-4 ? (cc / cl) : float2(0.0);\n" +
+            "        float2 comb = gRim + depthEff * radial;\n" +
+            "        float cl2 = length(comb);\n" +
+            "        n = cl2 > 1e-4 ? (comb / cl2) : gRim;\n" +
             "    } else {\n" +
-            "        rgb = sampleC(uv).rgb;\n" +
+            "        float2 e = float2(1.0, 0.0);\n" +
+            "        float2 g = float2(sdf(p + e.xy) - sdf(p - e.xy), sdf(p + e.yx) - sdf(p - e.yx));\n" +
+            "        float gl = length(g);\n" +
+            "        gRim = gl > 1e-4 ? g / gl : float2(0.0, 1.0);\n" +
+            "        n = gRim;\n" +
             "    }\n" +
-            "    float luma = dot(float3(rgb), float3(0.299, 0.587, 0.114));\n" +
-            "    rgb = half3(clamp(mix(float3(luma), float3(rgb), vib), 0.0, 1.0));\n" +
-            "    rgb = mix(rgb, half3(tint.rgb), half(tint.a));\n" +
-            "    float edge = smoothstep(3.2, 0.0, depth);\n" +
-            "    float topL = clamp(-n.y * 0.65 - n.x * 0.35, 0.0, 1.0);\n" +
-            "    float botL = clamp(n.y * 0.5 + n.x * 0.3, 0.0, 1.0);\n" +
-            "    float spec = edge * (0.28 + 0.72 * topL + 0.35 * botL) * rim;\n" +
-            "    float fresnel = pow(tIn, 3.0) * (dark > 0.5 ? 0.12 : 0.22) * rim;\n" +
-            "    float sheen = smoothstep(edgeW * 1.1, 0.0, depth) * clamp(-n.y, 0.0, 1.0) * 0.12 * rim;\n" +
-            "    rgb = clamp(rgb + half3(spec + fresnel + sheen), half3(0.0), half3(1.0));\n" +
+            "    float tIn = clamp(1.0 - depth / max(edgeW, 1.0), 0.0, 1.0);\n" +
+            "    float tOut = clamp(1.0 - depth / max(outerW, 1.0), 0.0, 1.0);\n" +
+            "    float bend = refr * circleMap(tIn) + outerRefr * circleMap(tOut) * tOut;\n" +
+            "    float2 baseP = magCenter + (p - magCenter) / max(mag, 0.01);\n" +
+            "    float2 off = n * bend;\n" +
+            "    float2 uv = baseP + off;\n" +
+            "    float3 rgb;\n" +
+            "    if (chroma > 0.005 && bend > 0.05) {\n" +
+            "        float cw = single ? clamp(abs((cc.x * cc.y) / max(hs.x * hs.y, 1.0)) * 1.45, 0.0, 1.0) : clamp(abs(gRim.x * gRim.y) * 2.0, 0.0, 1.0);\n" +
+            "        float2 disp = off * (chroma * (0.16 + 0.84 * cw));\n" +
+            "        float3 red = float3(sampleC(uv + disp).rgb);\n" +
+            "        float3 orange = float3(sampleC(uv + disp * 0.666667).rgb);\n" +
+            "        float3 yellow = float3(sampleC(uv + disp * 0.333333).rgb);\n" +
+            "        float3 green = float3(sampleC(uv).rgb);\n" +
+            "        float3 cyan = float3(sampleC(uv - disp * 0.333333).rgb);\n" +
+            "        float3 blue = float3(sampleC(uv - disp * 0.666667).rgb);\n" +
+            "        float3 purple = float3(sampleC(uv - disp).rgb);\n" +
+            "        rgb.r = (red.r + orange.r + yellow.r) / 3.5 + purple.r / 7.0;\n" +
+            "        rgb.g = orange.g / 7.0 + (yellow.g + green.g + cyan.g) / 3.5;\n" +
+            "        rgb.b = (cyan.b + blue.b + purple.b) / 3.0;\n" +
+            "    } else {\n" +
+            "        rgb = float3(sampleC(uv).rgb);\n" +
+            "    }\n" +
+            "    float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));\n" +
+            "    rgb = clamp(mix(float3(luma), rgb, vib), 0.0, 1.0);\n" +
+            "    rgb = mix(rgb, tint.rgb, tint.a);\n" +
+            "    if (innerShad > 0.001) {\n" +
+            "        float isBand = 1.0 - smoothstep(0.0, max(outerW * 2.2, 6.0), depth);\n" +
+            "        rgb *= (1.0 - innerShad * 0.14 * isBand);\n" +
+            "    }\n" +
+            "    float hd = dot(gRim, float2(0.7071, 0.7071));\n" +
+            "    float hiMag = pow(abs(hd), 1.35);\n" +
+            "    float shine = max(-hd, 0.0) * hiMag + 0.42 * max(hd, 0.0) * hiMag;\n" +
+            "    float edge = smoothstep(3.4, 0.0, depth);\n" +
+            "    float darkLine = smoothstep(-3.0, -1.2, d) * (1.0 - smoothstep(-1.2, 0.2, d));\n" +
+            "    rgb *= (1.0 - (dark > 0.5 ? 0.12 : 0.26) * darkLine * (1.0 - shine));\n" +
+            "    rgb = clamp(rgb + float3(edge * (0.22 + 0.88 * shine) * rim), 0.0, 1.0);\n" +
             "    if (pressAmt > 0.001 && pressR > 1.0) {\n" +
             "        float pd = length(p - pressPt) / pressR;\n" +
-            "        float glow = exp(-pd * pd * 1.4) * pressAmt;\n" +
+            "        float glow = exp(-pd * pd * 1.35) * pressAmt;\n" +
             "        float pEdge = edge * clamp(1.0 - pd * 0.7, 0.0, 1.0) * pressAmt;\n" +
-            "        rgb = mix(rgb, half3(1.0), half(clamp(glow * 0.48 + pEdge * 0.45, 0.0, 0.85)));\n" +
+            "        rgb = mix(rgb, float3(1.0), clamp(glow * 0.44 + pEdge * 0.42, 0.0, 0.82));\n" +
             "    }\n" +
             "    float a = mask * alpha;\n" +
-            "    return half4(rgb * half(a), half(a));\n" +
+            "    return half4(half3(rgb * a), half(a));\n" +
             "}\n";
 
-    /** Container whose children are mirrored into a RenderNode on every draw so floating glass can refract them. */
     static final class Backdrop extends FrameLayout {
-        final Object nodeObj; // RenderNode on API 29+
+        final Object nodeObj;
         boolean recorded;
         private boolean dirty = true;
 
@@ -150,10 +187,9 @@ final class Glass {
         }
     }
 
-    /** A single glass surface (1..3 smooth-unioned rounded rectangles) refracting a Backdrop + optional extra RenderNode. */
     static final class Surface {
-        final Object nodeObj; // RenderNode on API 29+
-        private Object shaderObj; // RuntimeShader on API 33+
+        final Object nodeObj;
+        private Object shaderObj;
         private final Paint shadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fallbackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -166,11 +202,13 @@ final class Glass {
         float blurDp = 2.5f;
         float refractDp = 15f;
         float edgeDp = 22f;
-        float outerDp = 5f;
-        float outerRefractDp = 12f;
-        float chroma = 0.7f;
-        float rim = 0.5f;
-        float vibrance = 1.25f;
+        float outerDp = 5.5f;
+        float outerRefractDp = 11f;
+        float chroma = 0.75f;
+        float rim = 0.45f;
+        float vibrance = 1.30f;
+        float depthEffect = 0.38f;
+        float innerShadow = 0f;
         float mag = 1f;
         float magX, magY;
         float pressX, pressY, pressR, pressAmt;
@@ -179,8 +217,7 @@ final class Glass {
         float shadowAlpha = 0.14f;
         int strokeColor = 0x26000000;
         boolean blur = true;
-        /** Extra RenderNode drawn on top of the backdrop inside the lens (e.g. dock icons/labels). */
-        Object extra; // RenderNode on API 29+
+        Object extra;
 
         Surface() {
             nodeObj = Build.VERSION.SDK_INT >= 29 ? new RenderNode("glass-surface") : null;
@@ -205,9 +242,8 @@ final class Glass {
             for (RectF r : shapes) if (!r.isEmpty()) bounds.union(r);
             if (bounds.isEmpty()) return;
 
-            // Soft drop shadow beneath the floating glass
             if (shadowAlpha > 0.005f) {
-                shadowPaint.setShadowLayer(Ui.dpf(12), 0, Ui.dpf(5), Ui.alpha(0xFF000000, shadowAlpha * alpha));
+                shadowPaint.setShadowLayer(Ui.dpf(13), 0, Ui.dpf(5), Ui.alpha(0xFF000000, shadowAlpha * alpha));
                 for (int i = 0; i < 3; i++) {
                     if (!shapes[i].isEmpty()) canvas.drawRoundRect(shapes[i], radii[i], radii[i], shadowPaint);
                 }
@@ -246,7 +282,10 @@ final class Glass {
             if (w <= 0 || h <= 0) return;
 
             try {
-                if (shaderObj == null) shaderObj = new RuntimeShader(SHADER);
+                if (shaderObj == null) {
+                    try { shaderObj = new RuntimeShader(SHADER); }
+                    catch (Throwable t1) { shaderObj = new RuntimeShader(SHADER.replace("content.eval(", "sample(content, ")); }
+                }
                 RuntimeShader shader = (RuntimeShader) shaderObj;
                 shader.setFloatUniform("iRes", (float) w, (float) h);
                 for (int i = 0; i < 3; i++) {
@@ -263,6 +302,8 @@ final class Glass {
                 shader.setFloatUniform("chroma", chroma);
                 shader.setFloatUniform("rim", rim);
                 shader.setFloatUniform("vib", vibrance);
+                shader.setFloatUniform("depthEff", depthEffect);
+                shader.setFloatUniform("innerShad", innerShadow);
                 shader.setFloatUniform("mag", mag);
                 shader.setFloatUniform("magCenter", (magX == 0 ? bounds.centerX() : magX) - l, (magY == 0 ? bounds.centerY() : magY) - t);
                 int tc = tint;
@@ -430,7 +471,6 @@ final class Glass {
         }
     }
 
-    /** Host view's top-left in {@code target}'s coordinate system. */
     static float[] offsetIn(View host, View target) {
         float[] a = abs(host), b = abs(target);
         return new float[]{a[0] - b[0], a[1] - b[1]};

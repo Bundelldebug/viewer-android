@@ -227,7 +227,7 @@ public final class Docs {
                 case ".hwp":
                     html = hwp(path);
                     kind = "word";
-                    note = "한글(HWP) 문서는 텍스트만 표시합니다. 편집 후 저장하면 DOCX 파일로 저장됩니다.";
+                    note = "편집 후 저장하면 DOCX 파일로 저장됩니다.";
                     break;
                 case ".doc":
                     html = doc(path);
@@ -908,18 +908,11 @@ public final class Docs {
 
     private static String hwpx(String path) throws Exception {
         imgBudget = 40L * 1024 * 1024;
-        try (ZipFile z = new ZipFile(path)) {
-            StringBuilder sb = new StringBuilder("<div class=\"docx hwp\">");
-            List<String> secs = hwpxSections(z);
-            if (secs.isEmpty()) throw new Exception("본문(section)을 찾을 수 없습니다.");
-            for (String s : secs) {
-                Document d = loadXml(z, s);
-                if (d != null && d.getDocumentElement() != null) {
-                    for (Element p : kids(d.getDocumentElement())) hBlock(p, z, sb);
-                }
+        return HwpRich.renderHwpx(path, new HwpRich.UnitRegistrar() {
+            @Override public String registerAttr(Element p) {
+                return ua(reg(p));
             }
-            return sb.append("</div>").toString();
-        }
+        });
     }
 
     static void hBlock(Element e, ZipFile z, StringBuilder sb) {
@@ -1279,56 +1272,13 @@ public final class Docs {
             if (e[1] >= 0 && e[1] < r.length) return Arrays.copyOf(r, e[1]);
             return r;
         }
+        Set<String> listEntries() {
+            return entries.keySet();
+        }
     }
 
     private static String hwp(String path) throws Exception {
-        Cfb cf = new Cfb(Util.readAllBytes(new File(path)));
-        byte[] fh = cf.read("FileHeader");
-        if (fh == null || fh.length < 40) throw new Exception("HWP 헤더를 읽을 수 없습니다.");
-        int flags = ByteBuffer.wrap(fh, 36, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-        boolean compressed = (flags & 1) != 0;
-        if ((flags & 2) != 0) throw new Exception("암호가 설정된 HWP 문서는 열 수 없습니다.");
-        if ((flags & 4) != 0) throw new Exception("배포용(보기 전용) HWP 문서는 열 수 없습니다.");
-        StringBuilder sb = new StringBuilder("<div class=\"docx hwp\">");
-        int sec = 0, total = 0;
-        while (true) {
-            byte[] raw = cf.read("BodyText/Section" + sec);
-            if (raw == null) break;
-            sec++;
-            if (compressed) raw = inflateRaw(raw);
-            int pos = 0;
-            while (pos + 4 <= raw.length) {
-                long h = ByteBuffer.wrap(raw, pos, 4).order(ByteOrder.LITTLE_ENDIAN).getInt() & 0xFFFFFFFFL;
-                pos += 4;
-                int tag = (int) (h & 0x3FF);
-                int size = (int) (h >>> 20);
-                if (size == 0xFFF) {
-                    if (pos + 4 > raw.length) break;
-                    size = ByteBuffer.wrap(raw, pos, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-                    pos += 4;
-                }
-                if (pos + size > raw.length || size < 0) break;
-                if (tag == 0x43) {
-                    StringBuilder t = new StringBuilder();
-                    for (int i = 0; i + 1 < size; ) {
-                        int ch = (raw[pos + i] & 0xFF) | ((raw[pos + i + 1] & 0xFF) << 8);
-                        if (ch >= 32) { t.append((char) ch); i += 2; }
-                        else if (ch == 9) { t.append('\t'); i += 2; }
-                        else if (ch == 10) { t.append('\n'); i += 2; }
-                        else if (ch == 13 || ch == 0) { i += 2; }
-                        else if (ch == 24 || ch == 30 || ch == 31) { t.append(ch == 24 ? "-" : " "); i += 2; }
-                        else i += 16;
-                    }
-                    String line = t.toString();
-                    total += line.length();
-                    sb.append(line.trim().isEmpty() ? "<p class=\"empty\">&nbsp;</p>" : "<p>" + esc(line).replace("\n", "<br>").replace("\t", "&emsp;") + "</p>");
-                }
-                pos += size;
-            }
-        }
-        if (sec == 0) throw new Exception("본문을 찾을 수 없습니다.");
-        if (total == 0) sb.append("<p class=\"muted\">(텍스트가 없습니다)</p>");
-        return sb.append("</div>").toString();
+        return HwpRich.renderHwp(path);
     }
 
     private static byte[] inflateRaw(byte[] data) throws Exception {

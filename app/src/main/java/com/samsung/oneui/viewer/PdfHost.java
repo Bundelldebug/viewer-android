@@ -395,7 +395,7 @@ public final class PdfHost {
                 tt.append(c < 128 ? c : '?');
             }
             String dt = new SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(new Date());
-            putAscii(w, infoObj + " 0 obj\n<< /Title (" + tt + ") /Producer (Samsung Viewer Android) /CreationDate (D:" + dt + ") >>\nendobj\n");
+            putAscii(w, infoObj + " 0 obj\n<< /Title (" + tt + ") /Producer (Viewer Android) /CreationDate (D:" + dt + ") >>\nendobj\n");
 
             long xref = w.pos;
             int total = w.nextObj;

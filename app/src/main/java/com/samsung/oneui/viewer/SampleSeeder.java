@@ -24,7 +24,7 @@ public final class SampleSeeder {
 
     public static File ensureWorkspaceDir(Context ctx) {
         File ext = ctx.getExternalFilesDir(null);
-        File base = (ext != null) ? new File(ext, "SamsungViewer_Samples") : new File(ctx.getFilesDir(), "SamsungViewer_Samples");
+        File base = (ext != null) ? new File(ext, "Viewer_Samples") : new File(ctx.getFilesDir(), "Viewer_Samples");
         if (!base.exists()) base.mkdirs();
         seedIfNeeded(base);
         return base;
@@ -42,9 +42,9 @@ public final class SampleSeeder {
             File marker = new File(dir, ".seeded_v1");
             if (marker.exists()) return;
 
-            createSampleAiPng(new File(dir, "01_Galaxy_OneUI_AI_Art.png"));
+            createSampleAiPng(new File(dir, "01_Aurora_AI_Art.png"));
             createSamplePhotoJpg(new File(dir, "02_Sunset_Landscape.jpg"));
-            createSamplePdf(new File(dir, "03_OneUI_Viewer_Guide.pdf"));
+            createSamplePdf(new File(dir, "03_Viewer_Guide.pdf"));
             createSampleDocx(new File(dir, "04_Project_Overview.docx"));
             createSampleXlsx(new File(dir, "05_Monthly_Metrics.xlsx"));
             createSampleHwpx(new File(dir, "06_Korean_Report_Sample.hwpx"));
@@ -80,12 +80,12 @@ public final class SampleSeeder {
         p.setColor(Color.WHITE);
         p.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
         p.setTextSize(68f);
-        c.drawText("Samsung Viewer", 148, 675, p);
+        c.drawText("Viewer", 148, 675, p);
 
         p.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
         p.setTextSize(34f);
         p.setColor(0xFFE5F0FF);
-        c.drawText("One UI 9.5 · Mobile & Tablet Edition", 148, 738, p);
+        c.drawText("9.5 · Mobile & Tablet Edition", 148, 738, p);
         c.drawText("Image · PDF · Office · HWP/HWPX · AI Metadata · Markup", 148, 800, p);
         c.drawText("Pinch Zoom · Instant Alpha · Color Adjust · OCR", 148, 858, p);
 
@@ -96,9 +96,9 @@ public final class SampleSeeder {
         byte[] pngBytes = injectPngTextChunk(
             rawPng.toByteArray(),
             "parameters",
-            "masterpiece, best quality, futuristic Samsung One UI 9.5 glassmorphism artwork, cobalt blue & cyan aurora, ultra detailed\n" +
+            "masterpiece, best quality, futuristic aurora glassmorphism artwork, cobalt blue & cyan aurora, ultra detailed\n" +
             "Negative prompt: blurry, low quality, watermark, artifacts\n" +
-            "Steps: 30, Sampler: DPM++ 2M Karras, CFG scale: 7.0, Seed: 20260950, Size: 1080x1080, Model: OneUI_XL_v95"
+            "Steps: 30, Sampler: DPM++ 2M Karras, CFG scale: 7.0, Seed: 20260950, Size: 1080x1080, Model: Aurora_XL_v95"
         );
         try (FileOutputStream fos = new FileOutputStream(outFile)) {
             fos.write(pngBytes);
@@ -172,7 +172,7 @@ public final class SampleSeeder {
     private static void createSamplePdf(File outFile) throws Exception {
         PdfDocument doc = new PdfDocument();
         String[] titles = new String[]{
-            "1. Samsung Viewer (Android) 소개",
+            "1. 뷰어 (Android) 소개",
             "2. 이미지 편집 · 마크업 · AI 메타데이터",
             "3. PDF 페이지 구성 및 오피스/한글 문서 편집"
         };
@@ -225,7 +225,7 @@ public final class SampleSeeder {
 
             p.setColor(0xFF64748B);
             p.setTextSize(14f);
-            c.drawText("Samsung Viewer One UI 9.5 — Page " + (i + 1) + " / 3", 76, 540, p);
+            c.drawText("Viewer 9.5 — Page " + (i + 1) + " / 3", 76, 540, p);
             doc.finishPage(page);
         }
 
@@ -252,8 +252,8 @@ public final class SampleSeeder {
             putZip(zos, "word/document.xml",
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
                 "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" +
-                "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>Samsung Viewer 안드로이드 프로젝트 개요</w:t></w:r></w:p>" +
-                "<w:p><w:r><w:t>이 문서는 Samsung Viewer 앱에서 직접 열람하고 상단 '문서 편집' 버튼을 눌러 내용을 수정 및 저장할 수 있는 DOCX 샘플 문서입니다.</w:t></w:r></w:p>" +
+                "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>뷰어 안드로이드 프로젝트 개요</w:t></w:r></w:p>" +
+                "<w:p><w:r><w:t>이 문서는 뷰어 앱에서 직접 열람하고 '문서 편집' 버튼을 눌러 내용을 수정 및 저장할 수 있는 DOCX 샘플 문서입니다.</w:t></w:r></w:p>" +
                 "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>주요 기능:</w:t></w:r></w:p>" +
                 "<w:p><w:r><w:t>1. 모바일 UI 및 태블릿 UI 자동/수동 전환 지원</w:t></w:r></w:p>" +
                 "<w:p><w:r><w:t>2. 문서 내 검색 및 찾아 바꾸기 (Find &amp; Replace)</w:t></w:r></w:p>" +
@@ -292,15 +292,15 @@ public final class SampleSeeder {
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
                 "<hs:sec xmlns:hs=\"http://www.hancom.co.kr/hwpml/2011/section\" xmlns:hp=\"http://www.hancom.co.kr/hwpml/2011/paragraph\">" +
                 "<hp:p><hp:run><hp:t>한글 HWPX 문서 열람 및 편집 샘플</hp:t></hp:run></hp:p>" +
-                "<hp:p><hp:run><hp:t>Samsung Viewer 안드로이드 버전은 HWP(한글 97~) 및 HWPX(개방형 한글) 문서를 별도 뷰어 없이 바로 열고 편집할 수 있습니다.</hp:t></hp:run></hp:p>" +
+                "<hp:p><hp:run><hp:t>뷰어 안드로이드 버전은 HWP(한글 97~) 및 HWPX(개방형 한글) 문서를 별도 뷰어 없이 바로 열고 편집할 수 있습니다.</hp:t></hp:run></hp:p>" +
                 "<hp:p><hp:run><hp:t>상단 툴바의 '문서 편집' 아이콘을 눌러 문단을 수정한 뒤 저장해 보세요.</hp:t></hp:run></hp:p>" +
                 "</hs:sec>");
         }
     }
 
     private static void createSampleMarkdown(File outFile) throws Exception {
-        String md = "# Samsung Viewer for Android (One UI 9.5)\n\n" +
-            "데스크톱용 **Samsung Viewer**의 모든 기능을 그대로 안드로이드 스마트폰 및 태블릿 환경에 맞춰 이식한 버전입니다.\n\n" +
+        String md = "# 뷰어 for Android (9.5)\n\n" +
+            "데스크톱용 **뷰어**의 모든 기능을 그대로 안드로이드 스마트폰 및 태블릿 환경에 맞춰 이식한 버전입니다.\n\n" +
             "## 핵심 특징\n" +
             "- **모바일 UI & 태블릿 UI 맞춤형 인터페이스**: 화면 크기에 따라 자동 전환되며, 설정에서 언제든 원하는 UI 모드를 직접 고정할 수 있습니다.\n" +
             "- **강력한 이미지 뷰어 & 편집기**: 자유/비율 자르기, 색상 조정, 인스턴트 알파(배경 제거), 벡터 마크업, 서명, AI 프롬프트 정보 추출.\n" +

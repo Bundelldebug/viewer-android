@@ -106,7 +106,7 @@ final class Pages {
             iconFrame.addView(iconView, new FrameLayout.LayoutParams(Ui.dp(60), Ui.dp(60), Gravity.CENTER));
             card.addView(iconFrame, new LinearLayout.LayoutParams(Ui.dp(76), Ui.dp(76)));
 
-            TextView titleTv = Ui.text(c, "Samsung Viewer", 21f, Ui.bold, Ui.text());
+            TextView titleTv = Ui.text(c, "뷰어", 21f, Ui.bold, Ui.text());
             titleTv.setTag("welcome-title");
             titleTv.setGravity(Gravity.CENTER);
             titleTv.setLetterSpacing(-0.02f);
@@ -445,14 +445,14 @@ final class Pages {
             String themeLabel = "dark".equals(curTheme) ? "다크" : ("light".equals(curTheme) ? "라이트" : "시스템 설정");
             app.row(Icons.APPEARANCE, Ui.ACCENT, "테마", themeLabel, true, v -> main.pickTheme(v));
 
-            app.row(Icons.SHAPES, 0xFF7B61FF, "앱 스타일", Ui.gStyle ? "G (One UI 9.5)" : "A (리퀴드 글래스)", true, v -> main.pickStyle(v));
+            app.row(Icons.SHAPES, 0xFF7B61FF, "앱 스타일", Ui.gStyle ? "G 스타일" : "A 스타일", true, v -> main.pickStyle(v));
 
             String ak = Ui.accentKey(p);
             String aName = Ui.ACCENT_NAMES[0];
             for (int i = 0; i < Ui.ACCENT_KEYS.length; i++) if (Ui.ACCENT_KEYS[i].equals(ak)) aName = Ui.ACCENT_NAMES[i];
             app.row(Icons.ADJUST, Ui.ACCENT, "강조 색상", aName, true, v -> main.pickAccent(v));
 
-            app.toggleRow(Icons.VIEW, 0xFF0FB59D, "리퀴드 글래스 굴절 효과", Ui.glass, on -> {
+            app.toggleRow(Icons.VIEW, 0xFF0FB59D, "글래스 굴절 효과", Ui.glass, on -> {
                 p.edit().putBoolean("glass", on).apply();
                 Ui.glass = on;
                 main.refreshVisualTheme();

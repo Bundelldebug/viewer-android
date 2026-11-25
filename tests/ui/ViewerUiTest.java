@@ -144,7 +144,7 @@ public class ViewerUiTest {
         MainActivity a = c.get();
         assertEquals("", field(a, "currentPath"));
         assertNotNull(tagged(a, "welcome-card"));
-        assertEquals("Samsung Viewer", ((TextView) tagged(a, "welcome-title")).getText().toString());
+        assertEquals("뷰어", ((TextView) tagged(a, "welcome-title")).getText().toString());
         assertNotNull(((ImageView) tagged(a, "welcome-icon")).getDrawable());
         assertNotNull(a.dock);
         assertNotNull(a.header);
@@ -222,12 +222,28 @@ public class ViewerUiTest {
         screenshot(a, "phone-settings-g-dark", 360, 800);
 
         // Verify Markdown release notes formatter removes raw syntax
-        CharSequence notes = Updater.formatReleaseNotes("## 9.5.3\n- **리퀴드 글래스** 및 `AGSL` 굴절 적용\n- [GitHub](https://github.com)");
+        CharSequence notes = Updater.formatReleaseNotes("## 9.5.4\n- **글래스 굴절** 및 `AGSL` 렌더링 적용\n- [GitHub](https://github.com)");
         String s = notes.toString();
         assertFalse(s.contains("##"));
         assertFalse(s.contains("**"));
         assertFalse(s.contains("`"));
-        assertTrue(s.contains("리퀴드 글래스"));
+        assertTrue(s.contains("글래스 굴절"));
+        c.pause().stop().destroy();
+    }
+
+    @Test public void searchBarTextIsVerticallyCentered() throws Exception {
+        ActivityController<MainActivity> c = launch(360, 800);
+        MainActivity a = c.get();
+        a.onSearch();
+        a.dock.search = 1f;
+        a.dock.field.setVisibility(View.VISIBLE);
+        a.dock.field.setText("문서 검색 정렬 확인");
+        layout(a, 360, 800);
+        int expectedH = Math.round(a.dock.circle.height());
+        assertEquals(expectedH, a.dock.field.getMeasuredHeight());
+        assertEquals(expectedH, a.dock.field.getHeight());
+        assertEquals(android.view.Gravity.CENTER_VERTICAL, a.dock.field.getGravity() & android.view.Gravity.VERTICAL_GRAVITY_MASK);
+        screenshot(a, "phone-search-bar", 360, 800);
         c.pause().stop().destroy();
     }
 

@@ -197,6 +197,9 @@ final class Dock extends FrameLayout {
         field = new EditText(c);
         field.setBackground(null);
         field.setSingleLine(true);
+        field.setIncludeFontPadding(false);
+        field.setMinHeight(0);
+        field.setMinimumHeight(0);
         field.setHint("파일, PDF 텍스트, OCR 검색");
         field.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f);
         field.setTextColor(Ui.text());
@@ -204,7 +207,7 @@ final class Dock extends FrameLayout {
         field.setTypeface(Ui.regular);
         field.setInputType(InputType.TYPE_CLASS_TEXT);
         field.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-        field.setGravity(Gravity.CENTER_VERTICAL);
+        field.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
         field.setPadding(0, 0, 0, 0);
         field.setVisibility(GONE);
         field.addTextChangedListener(new TextWatcher() {
@@ -512,10 +515,19 @@ final class Dock extends FrameLayout {
 
     private void positionField() {
         RectF host = (tablet || unifiedG()) ? pill : circle;
+        if (host.isEmpty()) return;
         int padL = Ui.dp(42), padR = Ui.dp(44);
-        int fl = (int) host.left + padL, fr = (int) host.right - padR;
-        if (fr <= fl) fr = fl + 1;
-        field.layout(fl, (int) host.top, fr, (int) host.bottom);
+        int fl = Math.round(host.left) + padL;
+        int fr = Math.round(host.right) - padR;
+        int ft = Math.round(host.top);
+        int fb = Math.round(host.bottom);
+        int fw = Math.max(1, fr - fl);
+        int fh = Math.max(1, fb - ft);
+        if (field.getMeasuredWidth() != fw || field.getMeasuredHeight() != fh) {
+            field.measure(MeasureSpec.makeMeasureSpec(fw, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(fh, MeasureSpec.EXACTLY));
+        }
+        field.layout(fl, ft, fl + fw, ft + fh);
     }
 
     private RectF activeCircleRect() {

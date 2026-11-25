@@ -225,7 +225,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
         File baseExt = getExternalFilesDir(null);
         if (baseExt == null) baseExt = getFilesDir();
-        sampleDir = new File(baseExt, "SamsungViewer_Samples");
+        sampleDir = new File(baseExt, "Viewer_Samples");
         if (!sampleDir.exists()) sampleDir.mkdirs();
         inboxDir = new File(getCacheDir(), "inbox");
         if (!inboxDir.exists()) inboxDir.mkdirs();
@@ -1248,11 +1248,11 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
     void pickStyle(View v) {
         List<GlassMenu.Entry> list = Arrays.asList(
-                new GlassMenu.Entry("A 스타일 (프리즘 리퀴드 글래스)", Icons.VIEW, !Ui.gStyle, () -> {
+                new GlassMenu.Entry("A 스타일 (글래스 굴절)", Icons.VIEW, !Ui.gStyle, () -> {
                     prefs.edit().putString("app_style", "prism").apply();
                     recreateChromeForTheme();
                 }).checkable(),
-                new GlassMenu.Entry("G 스타일 (One UI 9.5 프로스트)", Icons.SHAPES, Ui.gStyle, () -> {
+                new GlassMenu.Entry("G 스타일 (프로스트 블러)", Icons.SHAPES, Ui.gStyle, () -> {
                     prefs.edit().putString("app_style", "oneui").apply();
                     recreateChromeForTheme();
                 }).checkable()
@@ -2575,7 +2575,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
     private void copyToClipboard(String text) {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("SamsungViewer", text));
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Viewer", text));
     }
 
     private void copyCurrentImage() {

@@ -1,12 +1,12 @@
 ﻿{
-    "version":  "9.5.3",
+    "version":  "9.5.4",
     "appName":  "뷰어",
     "nativeGraphics":  true,
     "androidApi":  34,
     "physicalDevice":  false,
-    "tests":  20,
+    "tests":  21,
     "passed":  true,
-    "checkedAt":  "2026-11-25T20:00:10.6452261+09:00",
+    "checkedAt":  "2026-11-25T20:46:13.3996789+09:00",
     "screenshots":  [
                         "editor-320.png",
                         "editor-840.png",
@@ -19,6 +19,7 @@
                         "phone-drop.png",
                         "phone-glass-menu.png",
                         "phone-image.png",
+                        "phone-search-bar.png",
                         "phone-settings-a.png",
                         "phone-settings-g-dark.png",
                         "tablet-sidebar-1280.png",

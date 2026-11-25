@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
 final class Updater {
     private Updater() {}
 
-    static final String VERSION = "9.5.3";
+    static final String VERSION = "9.5.4";
     static final String REPO = "Bundelldebug/viewer-android";
     static final String PREF_AUTO = "update_auto";
     private static final long DAY = 24L * 60 * 60 * 1000;
@@ -310,7 +310,7 @@ final class Updater {
         }
         DownloadManager dm = (DownloadManager) a.getSystemService(Context.DOWNLOAD_SERVICE);
         if (dm == null) return;
-        String name = "SamsungViewer-" + r.version + ".apk";
+        String name = "Viewer-" + r.version + ".apk";
         File old = new File(a.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), name);
         if (old.exists()) old.delete();
         DownloadManager.Request q = new DownloadManager.Request(Uri.parse(r.apkUrl))

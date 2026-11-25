@@ -3,27 +3,25 @@ package com.samsung.oneui.viewer;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.FrameLayout;
-import android.widget.GridLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.File;
-import java.io.InputStream;
 import java.util.List;
 
 /**
- * Prism + Apple Preview inspired start browser:
- * Large One UI 9.5 title, 26dp rounded grouped cards, quick actions (Open, Paste, Capture, Blank Sketch),
- * and a recent-documents list ready for one-tap opening.
+ * Prism Music identical Home / Start Browser for Viewer:
+ * Large 34sp title, horizontal quick-action chips, Prism 26dp grouped file list,
+ * and floating bottom Prism Liquid Glass Dock (최근 | 책갈피 | 설정 + detached [+] button).
  */
 final class WelcomeView extends FrameLayout {
     static final int ACCENT = 0xFF387AFF;
@@ -34,151 +32,256 @@ final class WelcomeView extends FrameLayout {
         void capture();
         void newSketch();
         void openFile(File file);
+        void openSettings();
+        void checkUpdate();
+        void toggleTheme();
     }
 
     private final boolean dark;
+    private final Actions actions;
+    private final List<File> recentFiles;
+    private final List<String> bookmarks;
+    private final Glass.Backdrop backdrop;
+    private int activeTab = 0; // 0 = 최근, 1 = 책갈피, 2 = 설정
+    private LinearLayout content;
+    private LinearLayout dockPill;
     private TextView hint;
-    private LinearLayout body;
 
-    WelcomeView(Context context, boolean dark, Actions actions, List<File> recentFiles) {
+    WelcomeView(Context context, boolean dark, Glass.Backdrop backdrop, Actions actions,
+                List<File> recentFiles, List<String> bookmarks) {
         super(context);
         this.dark = dark;
+        this.backdrop = backdrop;
+        this.actions = actions;
+        this.recentFiles = recentFiles;
+        this.bookmarks = bookmarks;
         setTag("welcome");
-
-        int text1 = dark ? 0xFFF4F6FA : 0xFF111318;
-        int text2 = dark ? 0xFF9EA6B6 : 0xFF6B7280;
-        int cardBg = dark ? 0xFF1B1E26 : 0xFFFFFFFF;
-        int sepCol = dark ? 0x1AFFFFFF : 0x12000000;
+        setClipChildren(false);
 
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
         scroll.setVerticalScrollBarEnabled(false);
 
-        body = new LinearLayout(context) {
+        content = new LinearLayout(context) {
             @Override protected void onMeasure(int widthSpec, int heightSpec) {
-                int w = Math.min(MeasureSpec.getSize(widthSpec), dp(680));
+                int w = Math.min(MeasureSpec.getSize(widthSpec), dp(720));
                 super.onMeasure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY), heightSpec);
             }
         };
-        body.setTag("welcome-card");
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(18), dp(8), dp(18), dp(36));
+        content.setTag("welcome-card");
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(64), dp(16), dp(116));
 
         FrameLayout centerWrap = new FrameLayout(context);
-        centerWrap.addView(body, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL));
+        centerWrap.addView(content, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL));
         scroll.addView(centerWrap, new ScrollView.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         addView(scroll, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
-        // 1. Hero header (Prism style: icon + clean title, no PC slop)
-        LinearLayout hero = new LinearLayout(context);
-        hero.setOrientation(LinearLayout.HORIZONTAL);
-        hero.setGravity(Gravity.CENTER_VERTICAL);
-        hero.setPadding(dp(20), dp(18), dp(20), dp(18));
-        hero.setBackground(surface(cardBg, dp(26), 0));
+        // Floating Prism Bottom Dock (tab pill + detached circular [+] open button)
+        LinearLayout dockRow = new LinearLayout(context);
+        dockRow.setOrientation(LinearLayout.HORIZONTAL);
+        dockRow.setGravity(Gravity.CENTER_VERTICAL);
+        dockRow.setClipChildren(false);
+        dockRow.setPadding(dp(16), dp(8), dp(16), dp(14));
 
-        ImageView icon = new ImageView(context);
-        icon.setTag("welcome-icon");
-        icon.setContentDescription("뷰어");
-        try (InputStream input = context.getAssets().open("icon.png")) {
-            icon.setImageDrawable(Drawable.createFromStream(input, "viewer"));
-        } catch (java.io.IOException ignored) {
-            icon.setImageResource(context.getApplicationInfo().icon);
-        }
-        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        hero.addView(icon, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        dockPill = new LinearLayout(context);
+        dockPill.setOrientation(LinearLayout.HORIZONTAL);
+        dockPill.setGravity(Gravity.CENTER_VERTICAL);
+        dockPill.setPadding(dp(6), dp(5), dp(6), dp(5));
+        GlassDrawable.attachGlass(dockPill, Glass.shadersOk
+                ? GlassDrawable.bar(backdrop, dark ? 0xFF0E1015 : 0xFFF2F4F8, dp(32))
+                : surface(dark ? 0xE61C2029 : 0xEBFFFFFF, dp(32), dark ? 0x26FFFFFF : 0x18000000));
+        LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(0, dp(62), 1f);
+        pillLp.rightMargin = dp(10);
+        dockRow.addView(dockPill, pillLp);
 
-        LinearLayout heroText = new LinearLayout(context);
-        heroText.setOrientation(LinearLayout.VERTICAL);
-        heroText.setPadding(dp(16), 0, 0, 0);
-        TextView title = text("뷰어", 22, text1);
-        title.setTag("welcome-title");
-        title.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-        title.setGravity(Gravity.START);
-        TextView desc = text("PDF · 이미지 · 문서 보기 및 마크업", 13.5f, text2);
-        desc.setTag("welcome-description");
-        desc.setGravity(Gravity.START);
-        heroText.addView(title);
-        heroText.addView(desc);
-        hero.addView(heroText, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
-        body.addView(hero, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        // Detached circular glass [+] button (same silhouette as Prism's detached search circle)
+        FrameLayout plusCircle = new FrameLayout(context);
+        GlassDrawable.attachGlass(plusCircle, Glass.shadersOk
+                ? GlassDrawable.bar(backdrop, dark ? 0xFF0E1015 : 0xFFF2F4F8, dp(31))
+                : surface(dark ? 0xE61C2029 : 0xEBFFFFFF, dp(31), dark ? 0x26FFFFFF : 0x18000000));
+        ImageView plusIv = new ImageView(context);
+        plusIv.setImageDrawable(VectorIcons.create(context, "open", 22, dark ? 0xFFF4F6FA : 0xFF111318));
+        plusCircle.addView(plusIv, new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER));
+        plusCircle.setContentDescription("파일 열기");
+        plusCircle.setOnClickListener(v -> actions.open());
+        dockRow.addView(plusCircle, new LinearLayout.LayoutParams(dp(62), dp(62)));
 
-        // 2. Apple Preview style 4-tile Quick Actions grid
-        body.addView(sectionLabel("빠른 시작", text2));
-        GridLayout grid = new GridLayout(context);
-        grid.setTag("welcome-actions");
-        grid.setColumnCount(2);
-        addTile(grid, "파일 열기", "PDF·사진·문서", "folder", ACCENT, cardBg, text1, text2, "welcome-open", v -> actions.open());
-        addTile(grid, "빈 스케치", "새 캔버스 그리기", "markup", 0xFF10B981, cardBg, text1, text2, "welcome-sketch", v -> actions.newSketch());
-        addTile(grid, "붙여넣기", "클립보드 이미지", "copy", 0xFF8B5CF6, cardBg, text1, text2, "welcome-paste", v -> actions.paste());
-        addTile(grid, "화면 캡처", "현재 화면 편집", "crop", 0xFFF59E0B, cardBg, text1, text2, "welcome-capture", v -> actions.capture());
-        body.addView(grid, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        addView(dockRow, dlp);
 
-        // 3. Recent Documents (Apple Preview document browser section)
-        if (recentFiles != null && !recentFiles.isEmpty()) {
-            body.addView(sectionLabel("최근 항목", text2));
-            LinearLayout listCard = new LinearLayout(context);
-            listCard.setOrientation(LinearLayout.VERTICAL);
-            listCard.setBackground(surface(cardBg, dp(26), 0));
-            int count = Math.min(recentFiles.size(), 6);
-            for (int i = 0; i < count; i++) {
-                File f = recentFiles.get(i);
-                if (i > 0) {
-                    View div = new View(context);
-                    div.setBackgroundColor(sepCol);
-                    LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 1);
-                    dlp.leftMargin = dp(64);
-                    listCard.addView(div, dlp);
+        rebuildPage();
+        rebuildDock();
+    }
+
+    private void rebuildDock() {
+        dockPill.removeAllViews();
+        String[] labels = {"최근", "책갈피", "설정"};
+        String[] icons = {"folder", "bookmark", "menu"};
+        int ink = dark ? 0xFFB8C0D0 : 0xFF525A69;
+        int selBg = dark ? 0x28387AFF : 0x1A387AFF;
+        for (int i = 0; i < labels.length; i++) {
+            final int idx = i;
+            boolean sel = activeTab == i;
+            LinearLayout tab = new LinearLayout(getContext());
+            tab.setOrientation(LinearLayout.VERTICAL);
+            tab.setGravity(Gravity.CENTER);
+            tab.setPadding(dp(6), dp(6), dp(6), dp(6));
+            tab.setBackground(sel ? surface(selBg, dp(26), 0) : null);
+            GlassDrawable.attachRecoil(tab);
+
+            int fg = sel ? ACCENT : ink;
+            ImageView iv = new ImageView(getContext());
+            iv.setImageDrawable(VectorIcons.create(getContext(), icons[i], 20, fg));
+            tab.addView(iv, new LinearLayout.LayoutParams(dp(20), dp(20)));
+
+            TextView tv = text(labels[i], 10.5f, fg);
+            tv.setTypeface(Typeface.create("sans-serif", sel ? Typeface.BOLD : Typeface.NORMAL));
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+            tlp.topMargin = dp(2);
+            tab.addView(tv, tlp);
+
+            tab.setOnClickListener(v -> {
+                if (activeTab != idx) {
+                    activeTab = idx;
+                    rebuildPage();
+                    rebuildDock();
                 }
-                listCard.addView(recentRow(f, text1, text2, actions));
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, 1f);
+            lp.setMargins(dp(2), dp(2), dp(2), dp(2));
+            dockPill.addView(tab, lp);
+        }
+    }
+
+    private void rebuildPage() {
+        content.removeAllViews();
+        int text1 = dark ? 0xFFF4F6FA : 0xFF111318;
+        int text2 = dark ? 0xFF9EA6B6 : 0xFF6B7280;
+        int cardBg = dark ? 0xFF1B1E26 : 0xFFFFFFFF;
+        int sepCol = dark ? 0x1AFFFFFF : 0x12000000;
+
+        // Prism large title (no duplicate hero card!)
+        String pageTitle = activeTab == 0 ? "뷰어" : (activeTab == 1 ? "책갈피" : "설정");
+        TextView bigTitle = text(pageTitle, 34, text1);
+        bigTitle.setTag("welcome-title");
+        bigTitle.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        bigTitle.setGravity(Gravity.START);
+        LinearLayout.LayoutParams btlp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+        btlp.leftMargin = dp(4);
+        btlp.bottomMargin = dp(16);
+        content.addView(bigTitle, btlp);
+
+        if (activeTab == 0) {
+            // Prism-style clean horizontal quick chips (no pastel 2x2 AI slop tiles)
+            HorizontalScrollView hs = new HorizontalScrollView(getContext());
+            hs.setHorizontalScrollBarEnabled(false);
+            hs.setClipToPadding(false);
+            LinearLayout chipRow = new LinearLayout(getContext());
+            chipRow.setTag("welcome-actions");
+            chipRow.setOrientation(LinearLayout.HORIZONTAL);
+            chipRow.addView(quickChip("파일 열기", "open", true, cardBg, text1, "welcome-open", v -> actions.open()));
+            chipRow.addView(quickChip("빈 스케치", "markup", false, cardBg, text1, "welcome-sketch", v -> actions.newSketch()));
+            chipRow.addView(quickChip("붙여넣기", "copy", false, cardBg, text1, "welcome-paste", v -> actions.paste()));
+            chipRow.addView(quickChip("화면 캡처", "crop", false, cardBg, text1, "welcome-capture", v -> actions.capture()));
+            hs.addView(chipRow);
+            content.addView(hs, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+
+            // Recent Files — Prism 26dp grouped card
+            content.addView(sectionLabel("최근 항목", text2));
+            LinearLayout group = new LinearLayout(getContext());
+            group.setOrientation(LinearLayout.VERTICAL);
+            group.setBackground(surface(cardBg, dp(26), 0));
+            if (recentFiles == null || recentFiles.isEmpty()) {
+                TextView empty = text("최근에 연 문서가 없습니다", 14, text2);
+                empty.setPadding(dp(20), dp(28), dp(20), dp(28));
+                group.addView(empty);
+            } else {
+                int count = Math.min(recentFiles.size(), 12);
+                for (int i = 0; i < count; i++) {
+                    if (i > 0) group.addView(divider(sepCol));
+                    group.addView(fileRow(recentFiles.get(i), text1, text2));
+                }
             }
-            body.addView(listCard, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+            content.addView(group, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        } else if (activeTab == 1) {
+            LinearLayout group = new LinearLayout(getContext());
+            group.setOrientation(LinearLayout.VERTICAL);
+            group.setBackground(surface(cardBg, dp(26), 0));
+            if (bookmarks == null || bookmarks.isEmpty()) {
+                TextView empty = text("책갈피한 파일이 없습니다", 14, text2);
+                empty.setPadding(dp(20), dp(28), dp(20), dp(28));
+                group.addView(empty);
+            } else {
+                int added = 0;
+                for (String path : bookmarks) {
+                    File f = new File(path);
+                    if (!f.exists()) continue;
+                    if (added > 0) group.addView(divider(sepCol));
+                    group.addView(fileRow(f, text1, text2));
+                    added++;
+                }
+                if (added == 0) {
+                    TextView empty = text("책갈피한 파일이 없습니다", 14, text2);
+                    empty.setPadding(dp(20), dp(28), dp(20), dp(28));
+                    group.addView(empty);
+                }
+            }
+            content.addView(group, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        } else {
+            // Prism Settings grouped card
+            LinearLayout g1 = new LinearLayout(getContext());
+            g1.setOrientation(LinearLayout.VERTICAL);
+            g1.setBackground(surface(cardBg, dp(26), 0));
+            g1.addView(settingRow("테마 전환", dark ? "다크" : "라이트", text1, text2, v -> actions.toggleTheme()));
+            g1.addView(divider(sepCol));
+            g1.addView(settingRow("뷰어 설정", "내보내기 · 보기 옵션", text1, text2, v -> actions.openSettings()));
+            content.addView(g1, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+
+            content.addView(sectionLabel("앱 정보", text2));
+            LinearLayout g2 = new LinearLayout(getContext());
+            g2.setOrientation(LinearLayout.VERTICAL);
+            g2.setBackground(surface(cardBg, dp(26), 0));
+            g2.addView(settingRow("뷰어", Updater.VERSION, text1, text2, null));
+            g2.addView(divider(sepCol));
+            g2.addView(settingRow("업데이트 확인", "GitHub", text1, ACCENT, v -> actions.checkUpdate()));
+            content.addView(g2, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         }
 
-        hint = text("파일을 열거나 끌어다 놓으세요", 12.5f, text2);
+        hint = text("", 12, text2);
         hint.setTag("welcome-hint");
-        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        hlp.topMargin = dp(18);
-        body.addView(hint, hlp);
+        hint.setVisibility(View.GONE);
+        content.addView(hint);
     }
 
-    private void addTile(GridLayout grid, String label, String sub, String iconName, int tint,
-                         int cardBg, int text1, int text2, String tag, OnClickListener onClick) {
-        LinearLayout tile = new LinearLayout(getContext());
-        tile.setTag(tag);
-        tile.setOrientation(LinearLayout.VERTICAL);
-        tile.setPadding(dp(16), dp(16), dp(16), dp(16));
-        tile.setBackground(surface(cardBg, dp(24), 0));
-        tile.setOnClickListener(onClick);
-        GlassDrawable.attachRecoil(tile);
+    private View quickChip(String label, String iconName, boolean primary, int cardBg, int text1, String tag, OnClickListener onClick) {
+        LinearLayout chip = new LinearLayout(getContext());
+        chip.setTag(tag);
+        chip.setOrientation(LinearLayout.HORIZONTAL);
+        chip.setGravity(Gravity.CENTER_VERTICAL);
+        chip.setPadding(dp(14), dp(10), dp(16), dp(10));
+        chip.setBackground(surface(primary ? ACCENT : cardBg, dp(22), 0));
+        chip.setOnClickListener(onClick);
+        GlassDrawable.attachRecoil(chip);
 
-        FrameLayout badge = new FrameLayout(getContext());
-        badge.setBackground(surface(Ui.alpha(tint, dark ? 0.25f : 0.14f), dp(14), 0));
+        int fg = primary ? Color.WHITE : text1;
         ImageView iv = new ImageView(getContext());
-        iv.setImageDrawable(VectorIcons.create(getContext(), iconName, 20, tint));
-        badge.addView(iv, new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER));
-        tile.addView(badge, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        iv.setImageDrawable(VectorIcons.create(getContext(), iconName, 17, fg));
+        chip.addView(iv, new LinearLayout.LayoutParams(dp(17), dp(17)));
 
-        TextView t = text(label, 15, text1);
-        t.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-        t.setGravity(Gravity.START);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        tlp.topMargin = dp(12);
-        tile.addView(t, tlp);
+        TextView tv = text(label, 13.5f, fg);
+        tv.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        tlp.leftMargin = dp(7);
+        chip.addView(tv, tlp);
 
-        TextView s = text(sub, 12, text2);
-        s.setGravity(Gravity.START);
-        s.setMaxLines(1);
-        s.setEllipsize(TextUtils.TruncateAt.END);
-        tile.addView(s);
-
-        GridLayout.LayoutParams glp = new GridLayout.LayoutParams();
-        glp.width = 0;
-        glp.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
-        glp.setMargins(dp(5), dp(5), dp(5), dp(5));
-        grid.addView(tile, glp);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        lp.rightMargin = dp(8);
+        chip.setLayoutParams(lp);
+        return chip;
     }
 
-    private View recentRow(File f, int text1, int text2, Actions actions) {
+    private View fileRow(File f, int text1, int text2) {
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -188,35 +291,66 @@ final class WelcomeView extends FrameLayout {
 
         String name = f.getName();
         String ext = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1).toUpperCase() : "FILE";
-        int badgeCol = "PDF".equals(ext) ? 0xFFEF4444 : ("PNG".equals(ext) || "JPG".equals(ext) || "JPEG".equals(ext) || "WEBP".equals(ext) ? 0xFF387AFF : 0xFF10B981);
+        int badgeCol = "PDF".equals(ext) ? 0xFFEF4444
+                : ("PNG".equals(ext) || "JPG".equals(ext) || "JPEG".equals(ext) || "WEBP".equals(ext) ? ACCENT : 0xFF10B981);
 
-        TextView extBadge = text(ext.length() > 4 ? ext.substring(0, 4) : ext, 10.5f, Color.WHITE);
+        TextView extBadge = text(ext.length() > 4 ? ext.substring(0, 4) : ext, 10.5f, badgeCol);
         extBadge.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-        extBadge.setBackground(surface(badgeCol, dp(12), 0));
-        row.addView(extBadge, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        extBadge.setBackground(surface(Ui.alpha(badgeCol, dark ? 0.24f : 0.12f), dp(12), 0));
+        row.addView(extBadge, new LinearLayout.LayoutParams(dp(40), dp(40)));
 
         LinearLayout info = new LinearLayout(getContext());
         info.setOrientation(LinearLayout.VERTICAL);
-        info.setPadding(dp(12), 0, 0, 0);
-        TextView nm = text(name, 14.5f, text1);
+        info.setPadding(dp(13), 0, dp(8), 0);
+        TextView nm = text(name, 15f, text1);
         nm.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         nm.setGravity(Gravity.START);
         nm.setMaxLines(1);
         nm.setEllipsize(TextUtils.TruncateAt.END);
-        TextView sz = text(formatSize(f.length()), 12, text2);
+        TextView sz = text(formatSize(f.length()), 12.5f, text2);
         sz.setGravity(Gravity.START);
         info.addView(nm);
         info.addView(sz);
         row.addView(info, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView chev = text("›", 19, dark ? 0x55FFFFFF : 0x44000000);
+        row.addView(chev);
         return row;
     }
 
+    private View settingRow(String title, String value, int text1, int valCol, OnClickListener onClick) {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(18), dp(15), dp(18), dp(15));
+        if (onClick != null) {
+            row.setOnClickListener(onClick);
+            GlassDrawable.attachRecoil(row);
+        }
+        TextView t = text(title, 15.5f, text1);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setGravity(Gravity.START);
+        row.addView(t, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+        TextView v = text(value, 14f, valCol);
+        row.addView(v);
+        return row;
+    }
+
+    private View divider(int color) {
+        View div = new View(getContext());
+        div.setBackgroundColor(color);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 1);
+        dlp.leftMargin = dp(18);
+        div.setLayoutParams(dlp);
+        return div;
+    }
+
     private TextView sectionLabel(String label, int color) {
-        TextView tv = text(label, 13.5f, color);
+        TextView tv = text(label, 14f, color);
         tv.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
         tv.setGravity(Gravity.START);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(20);
+        lp.topMargin = dp(22);
         lp.bottomMargin = dp(8);
         lp.leftMargin = dp(6);
         tv.setLayoutParams(lp);
@@ -224,7 +358,9 @@ final class WelcomeView extends FrameLayout {
     }
 
     void setOpening(boolean opening) {
-        hint.setText(opening ? "파일을 여는 중…" : "파일을 열거나 끌어다 놓으세요");
+        if (hint == null) return;
+        hint.setVisibility(opening ? View.VISIBLE : View.GONE);
+        hint.setText(opening ? "파일을 여는 중…" : "");
     }
 
     private TextView text(String value, float size, int color) {

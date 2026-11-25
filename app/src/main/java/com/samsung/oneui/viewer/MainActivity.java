@@ -602,6 +602,8 @@ public class MainActivity extends Activity {
         floatingToolbarHost = new LinearLayout(this);
         floatingToolbarHost.setOrientation(LinearLayout.VERTICAL);
         floatingToolbarHost.setGravity(Gravity.CENTER_HORIZONTAL);
+        floatingToolbarHost.setClipChildren(false);
+        floatingToolbarHost.setClipToPadding(false);
         subbarContainer = new LinearLayout(this);
         subbarContainer.setOrientation(LinearLayout.HORIZONTAL);
         subbarContainer.setGravity(Gravity.CENTER_VERTICAL);
@@ -712,6 +714,7 @@ public class MainActivity extends Activity {
         rootFrame.addView(slideshowOverlay, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         installRootLayout();
+        applySystemBarColors();
         floatingToolbarHost.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             FrameLayout.LayoutParams stageParams = (FrameLayout.LayoutParams) stageHostFrame.getLayoutParams();
             if (isTabletLayout) {
@@ -765,7 +768,6 @@ public class MainActivity extends Activity {
     }
 
     private void buildWelcomeWorkspace() {
-        applySystemBarColors();
         sidebarVisible = infoVisible = false;
         sidebarContainer = sidebarListContainer = sidebarPdfActionRow = infoPanelContainer = infoContentBody = null;
         floatingToolbarHost = mainPillBar = subbarContainer = searchBarOverlay = statusBarContainer = null;
@@ -775,46 +777,54 @@ public class MainActivity extends Activity {
         Ui.init(this, isDarkTheme);
         rootFrame = new FrameLayout(this); rootFrame.setTag("welcome-root");
         rootFrame.setBackgroundColor(bgCol);
-        LinearLayout column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
-        rootFrame.addView(column, new FrameLayout.LayoutParams(-1,-1));
+        rootFrame.setClipChildren(false);
 
-        // Backdrop wraps the start browser so the top floating Prism pill refracts live content
+        // Fullscreen Backdrop so top-right pill & bottom Prism dock refract live scroll content
         stageHostFrame = new Glass.Backdrop(this);
         stageHostFrame.setTag("welcome-workspace");
         stageHostFrame.setBackgroundColor(bgCol);
-
-        topHeaderBar = new LinearLayout(this); topHeaderBar.setOrientation(LinearLayout.HORIZONTAL);
-        topHeaderBar.setGravity(Gravity.CENTER_VERTICAL);
-        topHeaderBar.setPadding(dp(18), dp(12), dp(14), dp(8));
-        headerTitleView = new TextView(this); headerTitleView.setText("뷰어"); headerTitleView.setTextColor(ink);
-        headerTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26); headerTitleView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-        topHeaderBar.addView(headerTitleView, new LinearLayout.LayoutParams(0, -2, 1f));
-        headerSubView = new TextView(this); headerSubView.setVisibility(View.GONE);
-
-        LinearLayout pill = new LinearLayout(this); pill.setTag("welcome-toolbar"); pill.setGravity(Gravity.CENTER_VERTICAL); pill.setPadding(dp(4), dp(2), dp(4), dp(2));
-        GlassDrawable pillGlass = GlassDrawable.bar((Glass.Backdrop) stageHostFrame, bgCol, dp(26));
-        pill.setBackground(Glass.shadersOk ? pillGlass : WelcomeView.surface(isDarkTheme ? 0xFF1E222B : Color.WHITE, dp(26), 0));
-        pill.setElevation(dp(3));
-        pill.setClipToOutline(true);
-        if (Glass.shadersOk) pillGlass.attachTouch(pill);
-        pill.addView(createIconBtn("open","파일 열기",ink,v -> launchSystemFilePicker()));
-        pill.addView(createIconBtn("markup","빈 스케치",ink,v -> createBlankSketch()));
-        pill.addView(createIconBtn("menu","메뉴",ink,v -> showTopOverflowMenu(v)));
-        topHeaderBar.addView(pill, new LinearLayout.LayoutParams(-2, -2));
-        column.addView(topHeaderBar, new LinearLayout.LayoutParams(-1, -2));
-
-        workspaceFrame = new FrameLayout(this); column.addView(workspaceFrame, new LinearLayout.LayoutParams(-1, 0, 1));
+        workspaceFrame = new FrameLayout(this);
+        workspaceFrame.setClipChildren(false);
         workspaceFrame.addView(stageHostFrame, new FrameLayout.LayoutParams(-1, -1));
-        emptyWelcomeView = new WelcomeView(this, isDarkTheme, new WelcomeView.Actions() {
+        rootFrame.addView(workspaceFrame, new FrameLayout.LayoutParams(-1, -1));
+
+        emptyWelcomeView = new WelcomeView(this, isDarkTheme, (Glass.Backdrop) stageHostFrame, new WelcomeView.Actions() {
             public void open() { launchSystemFilePicker(); }
             public void paste() { pasteClipboardImage(); }
             public void capture() { launchScreenCapture(); }
             public void newSketch() { createBlankSketch(); }
             public void openFile(File file) { if (file != null && file.exists()) openFileUnchecked(file.getAbsolutePath()); }
-        }, collectRecentFiles());
+            public void openSettings() { showSettingsDialog(); }
+            public void checkUpdate() { Updater.checkInteractive(MainActivity.this); }
+            public void toggleTheme() {
+                isDarkTheme = !isDarkTheme;
+                prefs.edit().putBoolean("system_theme", false).putBoolean("dark_theme", isDarkTheme).apply();
+                buildWelcomeWorkspace();
+            }
+        }, collectRecentFiles(), bookmarks);
         stageHostFrame.addView(emptyWelcomeView, new FrameLayout.LayoutParams(-1, -1));
         stageHostFrame.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> fitWelcomeAroundFold());
+
+        // Floating top-right Prism glass action pill (no duplicate title bar, zero double border)
+        topHeaderBar = new LinearLayout(this);
+        topHeaderBar.setOrientation(LinearLayout.HORIZONTAL);
+        topHeaderBar.setGravity(Gravity.CENTER_VERTICAL);
+        topHeaderBar.setTag("welcome-toolbar");
+        topHeaderBar.setPadding(dp(4), dp(2), dp(4), dp(2));
+        GlassDrawable pillGlass = GlassDrawable.bar((Glass.Backdrop) stageHostFrame, bgCol, dp(24));
+        GlassDrawable.attachGlass(topHeaderBar, Glass.shadersOk ? pillGlass
+                : WelcomeView.surface(isDarkTheme ? 0xE61C2029 : 0xEBFFFFFF, dp(24), isDarkTheme ? 0x26FFFFFF : 0x18000000));
+        topHeaderBar.addView(createIconBtn("markup", "빈 스케치", ink, v -> createBlankSketch()));
+        topHeaderBar.addView(createIconBtn("menu", "메뉴", ink, v -> showTopOverflowMenu(v)));
+        FrameLayout.LayoutParams thLp = new FrameLayout.LayoutParams(-2, dp(46), Gravity.TOP | Gravity.END);
+        thLp.topMargin = dp(10);
+        thLp.rightMargin = dp(14);
+        workspaceFrame.addView(topHeaderBar, thLp);
+
+        headerTitleView = new TextView(this); headerTitleView.setText("뷰어");
+        headerSubView = new TextView(this); headerSubView.setVisibility(View.GONE);
         installRootLayout();
+        applySystemBarColors();
     }
     private void fitWelcomeAroundFold() {
         if (emptyWelcomeView == null || !currentPath.isEmpty()) return;
@@ -871,10 +881,7 @@ public class MainActivity extends Activity {
         bar.setPadding(dp(isTabletLayout ? 8 : 12), 0, dp(isTabletLayout ? 8 : 12), 0);
         if (!isTabletLayout && stageHostFrame instanceof Glass.Backdrop) {
             GlassDrawable hdrGlass = GlassDrawable.bar((Glass.Backdrop) stageHostFrame, isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8, dp(26));
-            bar.setBackground(hdrGlass);
-            bar.setElevation(dp(4));
-            bar.setClipToOutline(true);
-            hdrGlass.attachTouch(bar);
+            GlassDrawable.attachGlass(bar, hdrGlass);
         } else {
             GradientDrawable gd = new GradientDrawable();
             gd.setColor(bgSurface);
@@ -916,7 +923,7 @@ public class MainActivity extends Activity {
         headerTitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
 
         headerSubView = new TextView(this);
-        headerSubView.setText("9.5.1");
+        headerSubView.setText("9.5.2");
         headerSubView.setTextColor(textSecondary);
         headerSubView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
         headerSubView.setSingleLine(true);
@@ -1414,10 +1421,9 @@ public class MainActivity extends Activity {
         mainPillBar.removeAllViews();
         if(currentPath.isEmpty() || "media".equals(currentKind)){floatingToolbarHost.setVisibility(View.GONE);return;}
         floatingToolbarHost.setVisibility(View.VISIBLE);
-        mainPillBar.setTag("editor-toolbar");mainPillBar.setPadding(dp(8),dp(4),dp(8),dp(4));
-        android.graphics.drawable.Drawable pillBg = glassOr(WelcomeView.surface(isDarkTheme?0xE61C2029:0xE8FFFFFF,dp(28),isDarkTheme?0x33FFFFFF:0x22000000),false,dp(28));
-        mainPillBar.setBackground(pillBg);mainPillBar.setElevation(dp(4));mainPillBar.setClipToOutline(true);
-        if (pillBg instanceof GlassDrawable) ((GlassDrawable) pillBg).attachTouch(mainPillBar);
+        mainPillBar.setTag("editor-toolbar");mainPillBar.setPadding(dp(8),dp(5),dp(8),dp(5));
+        android.graphics.drawable.Drawable pillBg = glassOr(WelcomeView.surface(isDarkTheme?0xE61C2029:0xE8FFFFFF,dp(30),isDarkTheme?0x33FFFFFF:0x22000000),false,dp(30));
+        GlassDrawable.attachGlass(mainPillBar, pillBg);
         int ink=isDarkTheme?0xFFF4F6FA:0xFF15181E;
         if("doc".equals(currentKind)) {
             addEditorAction("menu","도구",false,ink,v -> showEditorTools(v));
@@ -1438,18 +1444,21 @@ public class MainActivity extends Activity {
     }
     private View addEditorAction(String icon,String label,boolean active,int ink,View.OnClickListener action) {
         LinearLayout button=new LinearLayout(this);button.setOrientation(LinearLayout.VERTICAL);button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(4),dp(7),dp(4),dp(7));button.setMinimumHeight(dp(56));button.setMinimumWidth(dp(48));
+        button.setPadding(dp(4),dp(6),dp(4),dp(6));button.setMinimumHeight(dp(50));button.setMinimumWidth(dp(46));
         button.setTag("editor-"+icon);button.setContentDescription(label);button.setFocusable(true);button.setOnClickListener(action);
-        // No opaque solid fill inside liquid glass: subtle translucent tint when active, completely clear when idle
-        int activeTint = isDarkTheme ? 0x38387AFF : 0x22387AFF;
-        button.setBackground(active ? WelcomeView.surface(activeTint, dp(22), 0) : null);
+        // Clean Prism inner selection capsule with vertical breathing room (never clipped by bar edge)
+        int activeTint = isDarkTheme ? 0x2C387AFF : 0x1A387AFF;
+        button.setBackground(active ? WelcomeView.surface(activeTint, dp(24), 0) : null);
         GlassDrawable.attachRecoil(button);
         int fg = active ? WelcomeView.ACCENT : ink;
-        ImageView image=new ImageView(this);image.setImageDrawable(VectorIcons.create(this,icon,21,fg));
-        button.addView(image,new LinearLayout.LayoutParams(dp(21),dp(21)));
-        TextView caption=new TextView(this);caption.setText(label);caption.setTextColor(fg);caption.setTextSize(10.5f);caption.setGravity(Gravity.CENTER);caption.setMaxLines(1);caption.setPadding(0,dp(3),0,0);
+        ImageView image=new ImageView(this);image.setImageDrawable(VectorIcons.create(this,icon,20,fg));
+        button.addView(image,new LinearLayout.LayoutParams(dp(20),dp(20)));
+        TextView caption=new TextView(this);caption.setText(label);caption.setTextColor(fg);caption.setTextSize(10f);caption.setGravity(Gravity.CENTER);caption.setMaxLines(1);caption.setPadding(0,dp(2),0,0);
         if (active) caption.setTypeface(Typeface.DEFAULT_BOLD);
-        button.addView(caption,new LinearLayout.LayoutParams(-1,-2));mainPillBar.addView(button,new LinearLayout.LayoutParams(0,-2,1));return button;
+        button.addView(caption,new LinearLayout.LayoutParams(-1,-2));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, -2, 1);
+        blp.setMargins(dp(2), dp(2), dp(2), dp(2));
+        mainPillBar.addView(button, blp);return button;
     }
     private void showEditorTools(View anchor) {
         PopupMenu menu=new PopupMenu(this,anchor);
@@ -1491,14 +1500,11 @@ public class MainActivity extends Activity {
 
         GradientDrawable sbBg = new GradientDrawable();
         sbBg.setColor(isDarkTheme ? 0xE61C2029 : 0xE8FFFFFF);
-        sbBg.setCornerRadius(dp(22));
+        sbBg.setCornerRadius(dp(24));
         sbBg.setStroke(dp(1), isDarkTheme ? 0x33FFFFFF : 0x22000000);
-        android.graphics.drawable.Drawable sbGlass = glassOr(sbBg, false, dp(22));
-        subbarContainer.setBackground(sbGlass);
-        subbarContainer.setElevation(dp(4));
-        subbarContainer.setClipToOutline(true);
+        android.graphics.drawable.Drawable sbGlass = glassOr(sbBg, false, dp(24));
+        GlassDrawable.attachGlass(subbarContainer, sbGlass);
         subbarContainer.setPadding(dp(10), dp(6), dp(10), dp(6));
-        if (sbGlass instanceof GlassDrawable) ((GlassDrawable) sbGlass).attachTouch(subbarContainer);
         GlassDrawable.popIn(subbarContainer);
 
         HorizontalScrollView hsv = new HorizontalScrollView(this);
@@ -1830,18 +1836,23 @@ public class MainActivity extends Activity {
     private View createPillTextBtn(String text, boolean active, int defaultCol, View.OnClickListener listener) {
         TextView tv = new TextView(this);
         tv.setText(text);
-        tv.setTextColor(active ? Color.WHITE : defaultCol);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setPadding(dp(10), dp(6), dp(10), dp(6));
+        tv.setTextColor(active ? WelcomeView.ACCENT : defaultCol);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        tv.setTypeface(Typeface.create("sans-serif", active ? Typeface.BOLD : Typeface.NORMAL));
+        tv.setPadding(dp(12), dp(6), dp(12), dp(6));
         if (active) {
             GradientDrawable gd = new GradientDrawable();
-            gd.setColor(0xFF0381FE);
-            gd.setCornerRadius(dp(16));
+            gd.setColor(isDarkTheme ? 0x30387AFF : 0x1D387AFF);
+            gd.setCornerRadius(dp(17));
             tv.setBackground(gd);
         }
         tv.setOnClickListener(listener);
-        tv.setMinimumHeight(dp(48)); tv.setGravity(Gravity.CENTER);
+        GlassDrawable.attachRecoil(tv);
+        tv.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34));
+        lp.leftMargin = dp(2);
+        lp.rightMargin = dp(2);
+        tv.setLayoutParams(lp);
         return tv;
     }
 

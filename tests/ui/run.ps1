@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $UiRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $UiRoot '../..'))
 $Cache = Join-Path $UiRoot '.cache'
@@ -48,6 +48,7 @@ if ($NativeTemp -match '[^\x00-\x7F]') { throw 'Native graphics checks need an A
 New-Item -ItemType Directory -Force -Path $NativeTemp | Out-Null
 $AssetApk = Join-Path $NativeTemp 'viewer-test-assets.apk'
 if (Test-Path -LiteralPath $AssetApk) { Remove-Item -LiteralPath $AssetApk -Force }
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $Assets = [IO.Compression.ZipFile]::Open($AssetApk,[IO.Compression.ZipArchiveMode]::Create)
 try {
     $AssetRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'app/src/main/assets'))
@@ -59,7 +60,7 @@ try {
 & (Join-Path $JavaHome 'bin/java.exe') '--add-opens=java.base/java.io=ALL-UNNAMED' "-Duser.home=$Cache/home" "-Dmaven.repo.local=$Cache/m2" "-Djava.io.tmpdir=$NativeTemp" "-XX:ErrorFile=$NativeTemp/hs_err_pid%p.log" '-Drobolectric.dependency.repo.url=https://repo.maven.apache.org/maven2' "-Dviewer.assets=$AssetApk" "-Dviewer.output=$Cache/output" -cp $RuntimeClasspath org.junit.runner.JUnitCore com.samsung.oneui.viewer.ViewerUiTest
 if ($LASTEXITCODE -ne 0) { throw 'Native Android UI checks failed' }
 $Report = [ordered]@{
-    version='9.5 Book 2.0.9';appName='뷰어';nativeGraphics=$true;androidApi=34;physicalDevice=$false
+    version='9.5.3';appName='뷰어';nativeGraphics=$true;androidApi=34;physicalDevice=$false
     tests=([regex]::Matches([IO.File]::ReadAllText((Join-Path $UiRoot 'ViewerUiTest.java')),'@Test\b')).Count
     passed=$true;checkedAt=(Get-Date).ToString('o');screenshots=(Get-ChildItem (Join-Path $Cache 'output') -Filter '*.png' | ForEach-Object Name)
 }

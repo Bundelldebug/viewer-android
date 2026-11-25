@@ -12,330 +12,427 @@ import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 import android.os.Build;
 import android.view.View;
-import android.view.ViewParent;
 import android.widget.FrameLayout;
 
 /**
- * Liquid-glass rendering.
- * <p>
- * {@link Backdrop} records everything behind the floating chrome into a {@link RenderNode}. Each glass
- * element re-draws that node (blurred) through an AGSL signed-distance-field shader that produces the
- * rounded silhouette, smooth "metaball" unions between shapes, edge refraction, chromatic fringe, a
- * magnifying lens and a specular rim. Falls back to blur-only (API 31/32) or a flat frosted fill.
+ * Liquid Glass renderer ported 1:1 from Prism Music Android:
+ * real AGSL bevel refraction, outer lip bend, chromatic dispersion, specular rim,
+ * Gaussian touch glow, smooth-union metaball blending, and live backdrop RenderNode mirroring.
+ * Safely degrades on API 26–32 while enabling full AGSL Liquid Glass on API 33+.
  */
-/** Prism liquid glass (copied from Prism_Music_Android Glass.java — keep the two in sync; see skill prism-liquid-glass). */
 final class Glass {
     private Glass() {}
 
     static boolean shadersOk = Build.VERSION.SDK_INT >= 33;
 
+    /**
+     * Exact Prism AGSL Liquid Glass shader:
+     * Up to 3 rounded-rect shapes smooth-unioned together, with bevel refraction, steep outer lip,
+     * chromatic edge dispersion, magnification, specular rim highlight, vibrance boost, and touch glow.
+     */
     static final String SHADER =
             "uniform shader content;\n" +
-            "uniform float4 s0; uniform float s0r;\n" +
-            "uniform float4 s1; uniform float s1r;\n" +
-            "uniform float4 s2; uniform float s2r;\n" +
-            "uniform float smoothK;\n" +
-            "uniform float edgeW;\n" +
-            "uniform float refr;\n" +
-            "uniform float chroma;\n" +
-            "uniform float4 tint;\n" +
-            "uniform float rim;\n" +
-            "uniform float alphaMul;\n" +
-            "uniform float2 magC;\n" +
+            "uniform float2 iRes;\n" +
+            "uniform float4 s0, s1, s2;\n" +
+            "uniform float3 radii;\n" +
+            "uniform float smoothK, refr, edgeW, outerW, outerRefr, chroma, rim, vib;\n" +
             "uniform float mag;\n" +
-            "uniform float outerW;\n" +       // width of the thin, stronger rim band
-            "uniform float outerRefr;\n" +
-            "uniform float edgeDark;\n" +     // faint dark line just inside the rim
-            "uniform float2 lightDir;\n" +    // direction the specular highlight comes from
-            "uniform float vibrance;\n" +     // saturation of what's seen through the glass
-            "uniform float4 press;\n" +       // x, y, radius, strength of the touch glow
-            "float sdRR(float2 p, float4 r, float rad) {\n" +
-            "  float2 hs = r.zw * 0.5;\n" +
-            "  float rr = min(rad, min(hs.x, hs.y));\n" +
-            "  float2 q = abs(p - (r.xy + hs)) - hs + float2(rr, rr);\n" +
-            "  return length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - rr;\n" +
+            "uniform float2 magCenter;\n" +
+            "uniform float4 tint;\n" +
+            "uniform float alpha, dark;\n" +
+            "uniform float2 pressPt;\n" +
+            "uniform float pressR, pressAmt;\n" +
+            "\n" +
+            "float rbox(float2 p, float4 b, float r) {\n" +
+            "    if (b.z <= 0.0 || b.w <= 0.0) return 1e5;\n" +
+            "    float2 q = abs(p - b.xy) - b.zw + r;\n" +
+            "    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n" +
             "}\n" +
             "float smin(float a, float b, float k) {\n" +
-            "  if (k <= 0.0) { return min(a, b); }\n" +
-            "  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);\n" +
-            "  return mix(b, a, h) - k * h * (1.0 - h);\n" +
+            "    if (k <= 0.001) return min(a, b);\n" +
+            "    float h = max(k - abs(a - b), 0.0) / k;\n" +
+            "    return min(a, b) - h * h * k * 0.25;\n" +
             "}\n" +
-            "float scene(float2 p) {\n" +
-            "  float d = sdRR(p, s0, s0r);\n" +
-            "  if (s1.z > 0.5) { d = smin(d, sdRR(p, s1, s1r), smoothK); }\n" +
-            "  if (s2.z > 0.5) { d = smin(d, sdRR(p, s2, s2r), smoothK); }\n" +
-            "  return d;\n" +
+            "float sdf(float2 p) {\n" +
+            "    float d = rbox(p, s0, radii.x);\n" +
+            "    d = smin(d, rbox(p, s1, radii.y), smoothK);\n" +
+            "    d = smin(d, rbox(p, s2, radii.z), smoothK);\n" +
+            "    return d;\n" +
             "}\n" +
-            // height of a quarter-circle bevel: 1 at the rim, 0 once 'depth' reaches 'width'
-            "float bevel(float depth, float width) {\n" +
-            "  float t = clamp(depth / max(width, 0.001), 0.0, 1.0);\n" +
-            "  return 1.0 - sqrt(1.0 - (1.0 - t) * (1.0 - t));\n" +
+            "float2 grad(float2 p) {\n" +
+            "    float2 e = float2(1.5, 0.0);\n" +
+            "    return float2(sdf(p + e.xy) - sdf(p - e.xy), sdf(p + e.yx) - sdf(p - e.yx));\n" +
             "}\n" +
-            "float4 look(float2 at) { return float4(content.eval(at)); }\n" +
+            "half4 sampleC(float2 p) {\n" +
+            "    return content.eval(clamp(p, float2(0.5), iRes - float2(0.5)));\n" +
+            "}\n" +
             "half4 main(float2 p) {\n" +
-            "  float d = scene(p);\n" +
-            "  if (d > 1.5) { return half4(0.0, 0.0, 0.0, 0.0); }\n" +
-            "  float2 g = float2(scene(p + float2(1.0, 0.0)) - scene(p - float2(1.0, 0.0)),\n" +
-            "                    scene(p + float2(0.0, 1.0)) - scene(p - float2(0.0, 1.0)));\n" +
-            "  float gl = length(g);\n" +
-            "  float2 n = float2(0.0, 0.0);\n" +
-            "  if (gl > 0.0001) { n = g / gl; }\n" +
-            "  float depth = max(-d, 0.0);\n" +
-            // body bevel + a thinner, steeper lip right at the rim
-            "  float lip = 1.0 - smoothstep(0.0, max(outerW, 0.001), depth);\n" +
-            "  float bend = refr * bevel(depth, edgeW) + outerRefr * bevel(depth, outerW) * lip;\n" +
-            "  float2 q = magC + (p - magC) / mag;\n" +
-            "  float2 off = n * bend;\n" +
-            "  float4 c = look(q + off);\n" +
-            "  if (chroma > 0.0 && bend > 0.05) {\n" +
-            // dispersion peaks where the normal runs diagonally (rounded corners) and fades on flat sides
-            "    float diag = clamp(abs(n.x * n.y) * 2.0, 0.0, 1.0);\n" +
-            "    float spread = chroma * (0.3 + 0.7 * diag);\n" +
-            "    float4 r1 = look(q + off * (1.0 - spread));\n" +
-            "    float4 r2 = look(q + off * (1.0 - 0.5 * spread));\n" +
-            "    float4 b1 = look(q + off * (1.0 + 0.5 * spread));\n" +
-            "    float4 b2 = look(q + off * (1.0 + spread));\n" +
-            "    c = float4((r1.r + r2.r) * 0.5, (r2.g + c.g * 2.0 + b1.g) * 0.25, (b1.b + b2.b) * 0.5, c.a);\n" +
-            "  }\n" +
-            // vibrancy: what shows through the glass is a little richer than the page itself
-            "  float lum = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));\n" +
-            "  c.rgb = clamp(mix(float3(lum), c.rgb, vibrance), 0.0, 1.0);\n" +
-            "  c = float4(mix(c.rgb, tint.rgb, tint.a), mix(c.a, 1.0, tint.a));\n" +
-            // touch glow: soft gaussian bloom around the finger plus a faint lift of the whole surface
-            "  if (press.w > 0.001) {\n" +
-            "    float2 k = (p - press.xy) / max(press.z, 1.0);\n" +
-            "    float bloom = exp(-0.5 * dot(k, k)) * press.w;\n" +
-            "    float3 lifted = c.rgb * 1.08 + float3(0.07);\n" +
-            "    c.rgb = mix(c.rgb, lifted, clamp(bloom + press.w * 0.25, 0.0, 1.0));\n" +
-            "  }\n" +
-            // rim: thin dark inner line, then a highlight strongest facing the light and weaker opposite it
-            "  float line = smoothstep(-3.0, -1.2, d) * (1.0 - smoothstep(-1.2, 0.2, d));\n" +
-            "  float facing = max(dot(n, -lightDir), 0.0);\n" +
-            "  float back = max(dot(n, lightDir), 0.0);\n" +
-            "  float shine = facing * facing + 0.45 * back * back;\n" +
-            "  c.rgb = c.rgb * (1.0 - edgeDark * line * (1.0 - shine));\n" +
-            "  float rimMask = smoothstep(-3.5, 0.0, d) * (1.0 - smoothstep(0.0, 1.0, d));\n" +
-            "  c.rgb = c.rgb + float3(rim * rimMask * (0.25 + 0.75 * shine));\n" +
-            "  float a = clamp(0.5 - d, 0.0, 1.0) * alphaMul;\n" +
-            "  return half4(c * a);\n" +
+            "    float d = sdf(p);\n" +
+            "    float mask = clamp(0.5 - d, 0.0, 1.0);\n" +
+            "    if (mask <= 0.001) return half4(0.0);\n" +
+            "    float depth = -d;\n" +
+            "    float2 g = grad(p);\n" +
+            "    float gl = length(g);\n" +
+            "    float2 n = gl > 1e-4 ? g / gl : float2(0.0, 1.0);\n" +
+            "    float tIn = clamp(1.0 - depth / max(edgeW, 1.0), 0.0, 1.0);\n" +
+            "    float inner = tIn * tIn * tIn * refr;\n" +
+            "    float tOut = clamp(1.0 - depth / max(outerW, 1.0), 0.0, 1.0);\n" +
+            "    float outer = tOut * tOut * tOut * tOut * outerRefr;\n" +
+            "    float bend = inner + outer;\n" +
+            "    float2 baseP = magCenter + (p - magCenter) / max(mag, 0.01);\n" +
+            "    float2 uv = baseP - n * bend;\n" +
+            "    half3 rgb;\n" +
+            "    if (chroma > 0.01 && tIn > 0.01) {\n" +
+            "        float ca = chroma * (inner * 0.14 + outer * 0.35);\n" +
+            "        rgb = half3(sampleC(uv - n * ca).r, sampleC(uv).g, sampleC(uv + n * ca).b);\n" +
+            "    } else {\n" +
+            "        rgb = sampleC(uv).rgb;\n" +
+            "    }\n" +
+            "    float luma = dot(float3(rgb), float3(0.299, 0.587, 0.114));\n" +
+            "    rgb = half3(clamp(mix(float3(luma), float3(rgb), vib), 0.0, 1.0));\n" +
+            "    rgb = mix(rgb, half3(tint.rgb), half(tint.a));\n" +
+            "    float edge = smoothstep(3.2, 0.0, depth);\n" +
+            "    float topL = clamp(-n.y * 0.65 - n.x * 0.35, 0.0, 1.0);\n" +
+            "    float botL = clamp(n.y * 0.5 + n.x * 0.3, 0.0, 1.0);\n" +
+            "    float spec = edge * (0.28 + 0.72 * topL + 0.35 * botL) * rim;\n" +
+            "    float fresnel = pow(tIn, 3.0) * (dark > 0.5 ? 0.12 : 0.22) * rim;\n" +
+            "    float sheen = smoothstep(edgeW * 1.1, 0.0, depth) * clamp(-n.y, 0.0, 1.0) * 0.12 * rim;\n" +
+            "    rgb = clamp(rgb + half3(spec + fresnel + sheen), half3(0.0), half3(1.0));\n" +
+            "    if (pressAmt > 0.001 && pressR > 1.0) {\n" +
+            "        float pd = length(p - pressPt) / pressR;\n" +
+            "        float glow = exp(-pd * pd * 1.4) * pressAmt;\n" +
+            "        float pEdge = edge * clamp(1.0 - pd * 0.7, 0.0, 1.0) * pressAmt;\n" +
+            "        rgb = mix(rgb, half3(1.0), half(clamp(glow * 0.48 + pEdge * 0.45, 0.0, 0.85)));\n" +
+            "    }\n" +
+            "    float a = mask * alpha;\n" +
+            "    return half4(rgb * half(a), half(a));\n" +
             "}\n";
-    static RuntimeShader newShader() {
-        if (!shadersOk) return null;
-        try {
-            return new RuntimeShader(SHADER);
-        } catch (Throwable t) {
-            // older Skia builds only know the legacy sample(shader, coord) spelling
-            try {
-                return new RuntimeShader(SHADER.replace("content.eval(at)", "sample(content, at)"));
-            } catch (Throwable t2) {
-                shadersOk = false;
-                return null;
-            }
-        }
-    }
 
-    /** Container whose drawing is mirrored into a RenderNode so glass can sample it. */
+    /** Container whose children are mirrored into a RenderNode on every draw so floating glass can refract them. */
     static final class Backdrop extends FrameLayout {
-        final RenderNode node = new RenderNode("backdrop");
+        final Object nodeObj; // RenderNode on API 29+
         boolean recorded;
+        private boolean dirty = true;
 
-        Backdrop(Context c) { super(c); }
-
-        @Override public void draw(Canvas canvas) {
-            if (!canvas.isHardwareAccelerated()) { super.draw(canvas); recorded = false; return; }
-            node.setPosition(0, 0, getWidth(), getHeight());
-            RecordingCanvas rc = node.beginRecording(getWidth(), getHeight());
-            try {
-                super.draw(rc);
-            } finally {
-                node.endRecording();
-            }
-            recorded = true;
-            canvas.drawRenderNode(node);
-        }
-    }
-
-    /** One glass surface made of up to three rounded rects (smooth-unioned). Coordinates are view-local. */
-    static final class Surface {
-        final RectF a = new RectF(), b = new RectF(), c = new RectF();
-        float ra, rb, rc;
-        float smoothK;
-        float blurDp = 14f;
-        float refractDp = 9f, edgeDp = 16f, chroma = 0.0f, rim = 0.18f;
-        float mag = 1f, magX, magY;
-        // edgeDark / shadow keep glass visible even over a pure-white page, as in the reference
-        float outerDp = 5f, outerRefractDp = 5f, edgeDark = 0.32f, vibrance = 1.25f;
-        float lightX = -0.45f, lightY = -0.89f;
-        /** Touch glow in host-local px; strength 0 = off. */
-        float pressX, pressY, pressR, pressAmt;
-        int tint = Ui.glassTint();
-        float alpha = 1f;
-        boolean blur = true;
-        /** Optional node (in host-local coordinates) composited over the backdrop before refraction. */
-        RenderNode extra;
-
-        private final RenderNode node = new RenderNode("glass");
-        private final RuntimeShader shader = Glass.newShader();
-        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Path path = new Path();
-        private final RectF tmp = new RectF();
-        private float lastBlur = -1;
-        private RenderEffect blurEffect;
-        int strokeColor = Ui.glassStroke();
-        float shadowAlpha = 0.16f;
-
-        Surface() {
-            stroke.setStyle(Paint.Style.STROKE);
-            stroke.setStrokeWidth(Math.max(1f, Ui.dpf(0.6f)));
+        Backdrop(Context c) {
+            super(c);
+            nodeObj = Build.VERSION.SDK_INT >= 29 ? new RenderNode("glass-backdrop") : null;
         }
 
-        void shapes(RectF ra0, float r0, RectF rb0, float r1, RectF rc0, float r2) {
-            a.set(ra0); ra = r0;
-            if (rb0 != null) { b.set(rb0); rb = r1; } else b.setEmpty();
-            if (rc0 != null) { c.set(rc0); rc = r2; } else c.setEmpty();
+        @Override public void onDescendantInvalidated(View child, View target) {
+            dirty = true;
+            super.onDescendantInvalidated(child, target);
         }
 
-        Path outline() {
-            path.reset();
-            if (!a.isEmpty()) path.addRoundRect(a, Math.min(ra, a.height() / 2), Math.min(ra, a.height() / 2), Path.Direction.CW);
-            if (!b.isEmpty()) path.addRoundRect(b, Math.min(rb, b.height() / 2), Math.min(rb, b.height() / 2), Path.Direction.CW);
-            if (!c.isEmpty()) path.addRoundRect(c, Math.min(rc, c.height() / 2), Math.min(rc, c.height() / 2), Path.Direction.CW);
-            return path;
+        @Override public void invalidate() {
+            dirty = true;
+            super.invalidate();
         }
 
-        /** Draws the glass. {@code host} is the view whose canvas we draw into; {@code backdrop} supplies content. */
-        void draw(Canvas canvas, View host, Backdrop backdrop) {
-            if (alpha <= 0.001f || a.isEmpty()) return;
-            outline();
-            // soft drop shadow underneath (hidden inside because glass output is opaque there)
-            if (shadowAlpha > 0) {
-                fill.setColor(0x01FFFFFF);
-                fill.setShadowLayer(Ui.dpf(14), 0, Ui.dpf(4), Ui.alpha(0xFF000000, shadowAlpha * alpha * (Ui.dark ? 2.2f : 1f)));
-                canvas.drawPath(path, fill);
-                fill.clearShadowLayer();
-            }
-            // a surface may refract the page (backdrop) and/or its own host content (extra), e.g. a slider thumb over its track
-            boolean hw = canvas.isHardwareAccelerated() && Ui.glass && ((backdrop != null && backdrop.recorded) || extra != null);
-            if (hw) {
-                float pad = Ui.dpf(blurDp) * 2f + Ui.dpf(refractDp);
-                tmp.set(a);
-                if (!b.isEmpty()) tmp.union(b);
-                if (!c.isEmpty()) tmp.union(c);
-                float[] off = backdrop != null ? offsetIn(host, backdrop) : new float[]{0f, 0f};
-                int w = (int) Math.ceil(tmp.width() + pad * 2), h = (int) Math.ceil(tmp.height() + pad * 2);
-                float ox = tmp.left - pad, oy = tmp.top - pad;
-                node.setPosition(0, 0, w, h);
-                RenderEffect fx = null;
-                float br = blur ? Ui.dpf(blurDp) : 0f;
-                if (br > 0.5f) {
-                    if (br != lastBlur || blurEffect == null) {
-                        blurEffect = RenderEffect.createBlurEffect(br, br, Shader.TileMode.CLAMP);
-                        lastBlur = br;
-                    }
-                    fx = blurEffect;
-                }
-                if (shader != null && Glass.shadersOk) {
-                    // rebuild the effect only when something that feeds the shader actually changed:
-                    // avoids allocating effects every frame while the page scrolls underneath
-                    int sig = signature(-ox, -oy, br);
-                    if (sig != lastSig || cachedFx == null) {
-                        setUniforms(-ox, -oy);
-                        RenderEffect sh = RenderEffect.createRuntimeShaderEffect(shader, "content");
-                        cachedFx = fx == null ? sh : RenderEffect.createChainEffect(sh, fx);
-                        lastSig = sig;
-                        node.setRenderEffect(cachedFx);
-                    }
-                } else {
-                    node.setRenderEffect(fx);
-                }
-                RecordingCanvas rc = node.beginRecording(w, h);
+        boolean isBackdropDirty() { return dirty; }
+
+        @Override protected void dispatchDraw(Canvas c) {
+            dirty = false;
+            if (Build.VERSION.SDK_INT >= 29 && nodeObj != null && c.isHardwareAccelerated() && getWidth() > 0 && getHeight() > 0) {
+                RenderNode node = (RenderNode) nodeObj;
+                node.setPosition(0, 0, getWidth(), getHeight());
+                RecordingCanvas rc = node.beginRecording(getWidth(), getHeight());
                 try {
-                    rc.translate(-ox, -oy);
-                    if (backdrop != null && backdrop.recorded) {
-                        rc.save();
-                        rc.translate(-off[0], -off[1]);
-                        rc.drawRenderNode(backdrop.node);
-                        rc.restore();
-                    }
-                    if (extra != null) rc.drawRenderNode(extra);
+                    super.dispatchDraw(rc);
                 } finally {
                     node.endRecording();
                 }
-                canvas.save();
-                if (shader == null || !Glass.shadersOk) {
-                    canvas.clipPath(path);
-                }
-                canvas.translate(ox, oy);
-                if (shader == null || !Glass.shadersOk) {
-                    node.setAlpha(alpha);
-                    canvas.drawRenderNode(node);
-                    canvas.restore();
-                    fill.setColor(Ui.alpha(tint, alpha));
-                    canvas.drawPath(path, fill);
-                } else {
-                    node.setAlpha(1f);
-                    canvas.drawRenderNode(node);
-                    canvas.restore();
-                }
+                recorded = true;
+                c.drawRenderNode(node);
             } else {
-                int base = Ui.mix(Ui.bg(), tint | 0xFF000000, 0.55f);
-                fill.setColor(Ui.alpha(base, 0.96f * alpha));
-                canvas.drawPath(path, fill);
+                super.dispatchDraw(c);
             }
-            if (strokeColor != 0) {
-                stroke.setColor(Ui.alpha(strokeColor, alpha));
-                canvas.drawPath(path, stroke);
-            }
-        }
-
-        private RenderEffect cachedFx;
-        private int lastSig;
-
-        private int signature(float dx, float dy, float br) {
-            float[] v = {a.left + dx, a.top + dy, a.right + dx, a.bottom + dy, ra, b.left + dx, b.top + dy, b.right + dx, b.bottom + dy, rb,
-                    c.left + dx, c.top + dy, c.right + dx, c.bottom + dy, rc, smoothK, refractDp, edgeDp, chroma, rim, alpha, mag, magX + dx, magY + dy,
-                    outerDp, outerRefractDp, edgeDark, vibrance, pressX + dx, pressY + dy, pressR, pressAmt, br, tint, Ui.dark ? 1 : 0};
-            int h = 17;
-            // quantise positions to 1/4 px so sub-pixel jitter doesn't force a rebuild
-            for (float f : v) h = h * 31 + Math.round(f * 4f);
-            return h;
-        }
-
-        private void setUniforms(float dx, float dy) {
-            RuntimeShader s = shader;
-            s.setFloatUniform("s0", a.left + dx, a.top + dy, a.width(), a.height());
-            s.setFloatUniform("s0r", Math.min(ra, a.height() / 2f));
-            if (!b.isEmpty()) {
-                s.setFloatUniform("s1", b.left + dx, b.top + dy, b.width(), b.height());
-                s.setFloatUniform("s1r", Math.min(rb, b.height() / 2f));
-            } else { s.setFloatUniform("s1", 0f, 0f, 0f, 0f); s.setFloatUniform("s1r", 0f); }
-            if (!c.isEmpty()) {
-                s.setFloatUniform("s2", c.left + dx, c.top + dy, c.width(), c.height());
-                s.setFloatUniform("s2r", Math.min(rc, c.height() / 2f));
-            } else { s.setFloatUniform("s2", 0f, 0f, 0f, 0f); s.setFloatUniform("s2r", 0f); }
-            s.setFloatUniform("smoothK", smoothK);
-            s.setFloatUniform("edgeW", Ui.dpf(edgeDp));
-            s.setFloatUniform("refr", Ui.dpf(refractDp));
-            s.setFloatUniform("chroma", chroma);
-            float ta = ((tint >>> 24) / 255f);
-            s.setFloatUniform("tint", ((tint >> 16) & 255) / 255f, ((tint >> 8) & 255) / 255f, (tint & 255) / 255f, ta);
-            s.setFloatUniform("rim", rim);
-            s.setFloatUniform("alphaMul", alpha);
-            s.setFloatUniform("magC", magX + dx, magY + dy);
-            s.setFloatUniform("mag", Math.max(0.2f, mag));
-            s.setFloatUniform("outerW", Ui.dpf(outerDp));
-            s.setFloatUniform("outerRefr", Ui.dpf(outerRefractDp));
-            s.setFloatUniform("edgeDark", Ui.dark ? edgeDark * 0.4f : edgeDark);
-            s.setFloatUniform("lightDir", lightX, lightY);
-            s.setFloatUniform("vibrance", vibrance);
-            s.setFloatUniform("press", pressX + dx, pressY + dy, Math.max(1f, pressR), pressAmt);
         }
     }
 
-    /** Offset of {@code v}'s origin inside {@code backdrop}, accounting for translations and scrolls. */
-    static float[] offsetIn(View v, View backdrop) {
-        float[] a = abs(v), b = abs(backdrop);
+    /** A single glass surface (1..3 smooth-unioned rounded rectangles) refracting a Backdrop + optional extra RenderNode. */
+    static final class Surface {
+        final Object nodeObj; // RenderNode on API 29+
+        private Object shaderObj; // RuntimeShader on API 33+
+        private final Paint shadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fallbackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path clip = new Path();
+        private final RectF[] shapes = {new RectF(), new RectF(), new RectF()};
+        private final float[] radii = new float[3];
+        private final RectF bounds = new RectF();
+
+        float smoothK;
+        float blurDp = 2.5f;
+        float refractDp = 15f;
+        float edgeDp = 22f;
+        float outerDp = 5f;
+        float outerRefractDp = 12f;
+        float chroma = 0.7f;
+        float rim = 0.5f;
+        float vibrance = 1.25f;
+        float mag = 1f;
+        float magX, magY;
+        float pressX, pressY, pressR, pressAmt;
+        int tint = 0x52FFFFFF;
+        float alpha = 1f;
+        float shadowAlpha = 0.14f;
+        int strokeColor = 0x26000000;
+        boolean blur = true;
+        /** Extra RenderNode drawn on top of the backdrop inside the lens (e.g. dock icons/labels). */
+        Object extra; // RenderNode on API 29+
+
+        Surface() {
+            nodeObj = Build.VERSION.SDK_INT >= 29 ? new RenderNode("glass-surface") : null;
+            shadowPaint.setColor(0x01000000);
+            strokePaint.setStyle(Paint.Style.STROKE);
+        }
+
+        void shapes(RectF a, float ra, RectF b, float rb, RectF c, float rc) {
+            set(0, a, ra);
+            set(1, b, rb);
+            set(2, c, rc);
+        }
+
+        private void set(int i, RectF r, float rad) {
+            if (r == null || r.isEmpty()) { shapes[i].setEmpty(); radii[i] = 0; }
+            else { shapes[i].set(r); radii[i] = rad; }
+        }
+
+        void draw(Canvas canvas, View host, Backdrop backdrop) {
+            if (alpha <= 0.01f) return;
+            bounds.setEmpty();
+            for (RectF r : shapes) if (!r.isEmpty()) bounds.union(r);
+            if (bounds.isEmpty()) return;
+
+            // Soft drop shadow beneath the floating glass
+            if (shadowAlpha > 0.005f) {
+                shadowPaint.setShadowLayer(Ui.dpf(12), 0, Ui.dpf(5), Ui.alpha(0xFF000000, shadowAlpha * alpha));
+                for (int i = 0; i < 3; i++) {
+                    if (!shapes[i].isEmpty()) canvas.drawRoundRect(shapes[i], radii[i], radii[i], shadowPaint);
+                }
+            }
+
+            if (Ui.gStyle) {
+                drawGStyle(canvas, host, backdrop);
+                return;
+            }
+
+            boolean canShade = Build.VERSION.SDK_INT >= 33 && shadersOk && Ui.glass
+                    && canvas.isHardwareAccelerated() && nodeObj != null
+                    && ((backdrop != null && backdrop.recorded && backdrop.nodeObj != null) || extra != null);
+            if (canShade) {
+                drawAgsl(canvas, host, backdrop);
+                return;
+            }
+
+            if (Build.VERSION.SDK_INT >= 31 && Ui.glass && canvas.isHardwareAccelerated() && nodeObj != null
+                    && ((backdrop != null && backdrop.recorded && backdrop.nodeObj != null) || extra != null)) {
+                drawBlur31(canvas, host, backdrop);
+                return;
+            }
+
+            drawFallback(canvas);
+        }
+
+        private void drawAgsl(Canvas canvas, View host, Backdrop backdrop) {
+            if (Build.VERSION.SDK_INT < 33) return;
+            int pad = Math.round(Ui.dpf(refractDp + outerRefractDp + 6));
+            int l = Math.max(0, (int) Math.floor(bounds.left) - pad);
+            int t = Math.max(0, (int) Math.floor(bounds.top) - pad);
+            int r = Math.min(host.getWidth(), (int) Math.ceil(bounds.right) + pad);
+            int b = Math.min(host.getHeight(), (int) Math.ceil(bounds.bottom) + pad);
+            int w = r - l, h = b - t;
+            if (w <= 0 || h <= 0) return;
+
+            try {
+                if (shaderObj == null) shaderObj = new RuntimeShader(SHADER);
+                RuntimeShader shader = (RuntimeShader) shaderObj;
+                shader.setFloatUniform("iRes", (float) w, (float) h);
+                for (int i = 0; i < 3; i++) {
+                    RectF s = shapes[i];
+                    if (s.isEmpty()) shader.setFloatUniform("s" + i, 0f, 0f, 0f, 0f);
+                    else shader.setFloatUniform("s" + i, s.centerX() - l, s.centerY() - t, s.width() * 0.5f, s.height() * 0.5f);
+                }
+                shader.setFloatUniform("radii", radii[0], radii[1], radii[2]);
+                shader.setFloatUniform("smoothK", smoothK);
+                shader.setFloatUniform("refr", Ui.dpf(refractDp));
+                shader.setFloatUniform("edgeW", Ui.dpf(edgeDp));
+                shader.setFloatUniform("outerW", Ui.dpf(outerDp));
+                shader.setFloatUniform("outerRefr", Ui.dpf(outerRefractDp));
+                shader.setFloatUniform("chroma", chroma);
+                shader.setFloatUniform("rim", rim);
+                shader.setFloatUniform("vib", vibrance);
+                shader.setFloatUniform("mag", mag);
+                shader.setFloatUniform("magCenter", (magX == 0 ? bounds.centerX() : magX) - l, (magY == 0 ? bounds.centerY() : magY) - t);
+                int tc = tint;
+                shader.setFloatUniform("tint", ((tc >> 16) & 255) / 255f, ((tc >> 8) & 255) / 255f, (tc & 255) / 255f, (tc >>> 24) / 255f);
+                shader.setFloatUniform("alpha", alpha);
+                shader.setFloatUniform("dark", Ui.dark ? 1f : 0f);
+                shader.setFloatUniform("pressPt", pressX - l, pressY - t);
+                shader.setFloatUniform("pressR", pressR);
+                shader.setFloatUniform("pressAmt", pressAmt);
+
+                RenderEffect fx = RenderEffect.createRuntimeShaderEffect(shader, "content");
+                if (blur && blurDp > 0.2f) {
+                    float bp = Ui.dpf(blurDp);
+                    fx = RenderEffect.createChainEffect(fx, RenderEffect.createBlurEffect(bp, bp, Shader.TileMode.CLAMP));
+                }
+
+                RenderNode node = (RenderNode) nodeObj;
+                node.setPosition(l, t, r, b);
+                node.setRenderEffect(fx);
+                RecordingCanvas rc = node.beginRecording(w, h);
+                try {
+                    if (backdrop != null && backdrop.recorded && backdrop.nodeObj != null) {
+                        float[] off = offsetIn(host, backdrop);
+                        rc.save();
+                        rc.translate(-(off[0] + l), -(off[1] + t));
+                        rc.drawRenderNode((RenderNode) backdrop.nodeObj);
+                        rc.restore();
+                    }
+                    if (extra instanceof RenderNode) {
+                        rc.save();
+                        rc.translate(-l, -t);
+                        rc.drawRenderNode((RenderNode) extra);
+                        rc.restore();
+                    }
+                } finally {
+                    node.endRecording();
+                }
+                canvas.drawRenderNode(node);
+
+                if (strokeColor != 0 && smoothK <= 0.5f) {
+                    strokePaint.setColor(Ui.alpha(strokeColor, alpha));
+                    strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.55f)));
+                    for (int i = 0; i < 3; i++) {
+                        if (!shapes[i].isEmpty()) canvas.drawRoundRect(shapes[i], radii[i], radii[i], strokePaint);
+                    }
+                }
+            } catch (Throwable ignored) {
+                shadersOk = false;
+                drawFallback(canvas);
+            }
+        }
+
+        private void drawBlur31(Canvas canvas, View host, Backdrop backdrop) {
+            if (Build.VERSION.SDK_INT < 31 || nodeObj == null) { drawFallback(canvas); return; }
+            int l = Math.max(0, (int) Math.floor(bounds.left));
+            int t = Math.max(0, (int) Math.floor(bounds.top));
+            int r = Math.min(host.getWidth(), (int) Math.ceil(bounds.right));
+            int b = Math.min(host.getHeight(), (int) Math.ceil(bounds.bottom));
+            int w = r - l, h = b - t;
+            if (w <= 0 || h <= 0) return;
+
+            clip.reset();
+            for (int i = 0; i < 3; i++) {
+                if (!shapes[i].isEmpty()) clip.addRoundRect(shapes[i], radii[i], radii[i], Path.Direction.CW);
+            }
+            RenderNode node = (RenderNode) nodeObj;
+            float bp = Ui.dpf(Math.max(2f, blurDp));
+            node.setPosition(l, t, r, b);
+            node.setRenderEffect(blur ? RenderEffect.createBlurEffect(bp, bp, Shader.TileMode.CLAMP) : null);
+            RecordingCanvas rc = node.beginRecording(w, h);
+            try {
+                if (backdrop != null && backdrop.recorded && backdrop.nodeObj != null) {
+                    float[] off = offsetIn(host, backdrop);
+                    rc.save();
+                    rc.translate(-(off[0] + l), -(off[1] + t));
+                    rc.drawRenderNode((RenderNode) backdrop.nodeObj);
+                    rc.restore();
+                }
+                if (extra instanceof RenderNode) {
+                    rc.save();
+                    rc.translate(-l, -t);
+                    rc.drawRenderNode((RenderNode) extra);
+                    rc.restore();
+                }
+            } finally {
+                node.endRecording();
+            }
+            canvas.save();
+            canvas.clipPath(clip);
+            canvas.drawRenderNode(node);
+            fallbackPaint.setColor(Ui.alpha(tint, alpha));
+            canvas.drawPath(clip, fallbackPaint);
+            canvas.restore();
+            strokePaint.setColor(Ui.alpha(strokeColor == 0 ? Ui.glassStroke() : strokeColor, alpha));
+            strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.6f)));
+            canvas.drawPath(clip, strokePaint);
+        }
+
+        private void drawGStyle(Canvas canvas, View host, Backdrop backdrop) {
+            if (Build.VERSION.SDK_INT >= 31 && canvas.isHardwareAccelerated() && nodeObj != null && backdrop != null && backdrop.recorded && backdrop.nodeObj != null) {
+                int l = Math.max(0, (int) Math.floor(bounds.left));
+                int t = Math.max(0, (int) Math.floor(bounds.top));
+                int r = Math.min(host.getWidth(), (int) Math.ceil(bounds.right));
+                int b = Math.min(host.getHeight(), (int) Math.ceil(bounds.bottom));
+                int w = r - l, h = b - t;
+                if (w > 0 && h > 0) {
+                    clip.reset();
+                    for (int i = 0; i < 3; i++) {
+                        if (!shapes[i].isEmpty()) clip.addRoundRect(shapes[i], radii[i], radii[i], Path.Direction.CW);
+                    }
+                    RenderNode node = (RenderNode) nodeObj;
+                    float bp = Ui.dpf(22f);
+                    node.setPosition(l, t, r, b);
+                    node.setRenderEffect(RenderEffect.createBlurEffect(bp, bp, Shader.TileMode.CLAMP));
+                    RecordingCanvas rc = node.beginRecording(w, h);
+                    try {
+                        float[] off = offsetIn(host, backdrop);
+                        rc.save();
+                        rc.translate(-(off[0] + l), -(off[1] + t));
+                        rc.drawRenderNode((RenderNode) backdrop.nodeObj);
+                        rc.restore();
+                    } finally {
+                        node.endRecording();
+                    }
+                    canvas.save();
+                    canvas.clipPath(clip);
+                    canvas.drawRenderNode(node);
+                    fallbackPaint.setColor(Ui.alpha(Ui.gTint(tint), alpha));
+                    canvas.drawPath(clip, fallbackPaint);
+                    canvas.restore();
+                    strokePaint.setColor(Ui.alpha(Ui.gStroke(), alpha));
+                    strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.75f)));
+                    canvas.drawPath(clip, strokePaint);
+                    return;
+                }
+            }
+            fallbackPaint.setColor(Ui.alpha(Ui.gTint(tint), alpha));
+            strokePaint.setColor(Ui.alpha(Ui.gStroke(), alpha));
+            strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.75f)));
+            for (int i = 0; i < 3; i++) {
+                if (!shapes[i].isEmpty()) {
+                    canvas.drawRoundRect(shapes[i], radii[i], radii[i], fallbackPaint);
+                    canvas.drawRoundRect(shapes[i], radii[i], radii[i], strokePaint);
+                }
+            }
+        }
+
+        private void drawFallback(Canvas canvas) {
+            int col = Ui.dark ? 0xD91C1C1E : 0xEBFAFAFC;
+            if ((tint >>> 24) < 0x30) col = Ui.dark ? 0x26FFFFFF : 0x22000000;
+            fallbackPaint.setColor(Ui.alpha(col, alpha));
+            strokePaint.setColor(Ui.alpha(strokeColor == 0 ? Ui.glassStroke() : strokeColor, alpha));
+            strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.75f)));
+            for (int i = 0; i < 3; i++) {
+                if (!shapes[i].isEmpty()) {
+                    canvas.drawRoundRect(shapes[i], radii[i], radii[i], fallbackPaint);
+                    canvas.drawRoundRect(shapes[i], radii[i], radii[i], strokePaint);
+                    if (pressAmt > 0.01f && pressR > 1f) {
+                        fallbackPaint.setColor(Ui.alpha(Ui.dark ? 0x44FFFFFF : 0x24000000, pressAmt * alpha));
+                        canvas.drawRoundRect(shapes[i], radii[i], radii[i], fallbackPaint);
+                        fallbackPaint.setColor(Ui.alpha(col, alpha));
+                    }
+                }
+            }
+        }
+    }
+
+    /** Host view's top-left in {@code target}'s coordinate system. */
+    static float[] offsetIn(View host, View target) {
+        float[] a = abs(host), b = abs(target);
         return new float[]{a[0] - b[0], a[1] - b[1]};
     }
 
@@ -343,14 +440,10 @@ final class Glass {
         float x = 0, y = 0;
         View cur = v;
         while (cur != null) {
-            x += cur.getLeft() + cur.getTranslationX();
-            y += cur.getTop() + cur.getTranslationY();
-            ViewParent p = cur.getParent();
-            if (!(p instanceof View)) break;
-            View pv = (View) p;
-            x -= pv.getScrollX();
-            y -= pv.getScrollY();
-            cur = pv;
+            x += cur.getX();
+            y += cur.getY();
+            if (!(cur.getParent() instanceof View)) break;
+            cur = (View) cur.getParent();
         }
         return new float[]{x, y};
     }

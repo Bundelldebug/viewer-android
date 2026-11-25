@@ -1,54 +1,48 @@
 package com.samsung.oneui.viewer;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.ProgressDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
-import android.database.Cursor;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Movie;
 import android.graphics.Paint;
 import android.graphics.Path;
-import android.graphics.RectF;
 import android.graphics.Rect;
-import android.graphics.Typeface;
+import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.pdf.PdfDocument;
 import android.media.MediaScannerConnection;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.CancellationSignal;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
-import android.print.PageRange;
-import android.print.PrintAttributes;
-import android.print.PrintDocumentAdapter;
-import android.print.PrintDocumentInfo;
+import android.os.ResultReceiver;
 import android.print.PrintManager;
-import android.print.pdf.PrintedPdfDocument;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
-import android.provider.OpenableColumns;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
-import android.util.DisplayMetrics;
 import android.util.TypedValue;
+import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -56,27 +50,22 @@ import android.view.WindowManager;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.Date;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -84,11 +73,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 100% Pure Native Android MainActivity for Samsung Viewer (One UI 9.5).
- * Zero WebView usage. Compatible with all non-rooted Android devices (Android 8.0 ~ 15+).
- * Dynamically adapts between Mobile UI (Smartphone) and Tablet UI (Galaxy Tab / Fold / DeX).
+ * Samsung Viewer Android (9.5.3) rebuilt cleanly on Prism Music Android's Liquid Glass UI engine:
+ * - True AGSL Liquid Glass Backdrop + Header + Dock (draggable magnifying refractive lens + real-time active accent clipping)
+ * - Press-to-expand icon regions + drop-morphing GlassMenu context menus & sheets
+ * - Full Viewer feature parity: Image / Animated GIF / Multi-page PDF / Office & HWP / Media / Markup / Edit / OCR / Print / Export / Capture / Drag-and-drop.
  */
-public class MainActivity extends Activity {
+public final class MainActivity extends Activity implements Dock.Listener, Header.Listener {
 
     private static final int REQ_OPEN_DOC = 1001;
     private static final int REQ_CREATE_DOC = 1002;
@@ -96,61 +86,51 @@ public class MainActivity extends Activity {
     private static final int REQ_INSERT_PAGE_DOC = 1004;
     private static final int REQ_OPEN_TREE = 1005;
     private static final int REQ_CAPTURE = 1006;
-    private DocumentStore documents;
 
+    static SharedPreferences prefs(Context c) {
+        return c.getApplicationContext().getSharedPreferences("samsung_viewer_native_prefs", MODE_PRIVATE);
+    }
+
+    // ---- Backend executors & services ----
+    private DocumentStore documents;
     private final ExecutorService bgPool = Executors.newCachedThreadPool();
     private final ExecutorService filePool = Executors.newSingleThreadExecutor();
     private final ExecutorService ocrPool = Executors.newSingleThreadExecutor();
-    private volatile int searchTicket;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
 
-    // App Workspace Directories (100% Accessible on Non-Rooted Devices)
     private File sampleDir;
     private File inboxDir;
     private File pendingCameraFile;
     private byte[] pendingExportBytes;
-    private Runnable afterSave;
-    private Runnable afterSaveCancelled;
-    private boolean saveRunning;
-    private boolean flattenedPdfApproved;
-    private int imageLoadTicket;
     private File pendingExportFile;
+    private Runnable afterSave, afterSaveCancelled;
+    private boolean saveRunning, flattenedPdfApproved;
+    private volatile int openTicket, imageLoadTicket, searchTicket;
     private final List<Runnable> dropPermissions = new ArrayList<>();
-    private View dropOverlay;
-    private volatile int openTicket;
     private boolean capturePending, activityResumed;
-    private int exportQuality = 100, exportDpi = 300;
 
-    // UI Mode & Theme State
-    private String uiModePref = "auto"; // "auto", "mobile", "tablet"
-    private boolean isTabletLayout = false;
-    private float windowWidthDp = 360;
-    private Rect foldBounds;
+    int exportQuality = 100;
+    int exportDpi = 300;
+    int slideshowIntervalSec = 3;
+    boolean isDarkTheme;
+    Rect foldBounds;
     private final FoldObserver foldObserver = new FoldObserver();
-    private boolean bookLayout = false;
-    private FrameLayout workspaceFrame;
-    private boolean isDarkTheme = true;
-    private boolean sidebarVisible = false;
-    private boolean infoVisible = false;
-    private String sidebarTab = "thumbs"; // "thumbs", "anns", "bookmarks"
-    private String sortOrder = "name"; // "name", "date", "size"
 
-    // Current File & Folder State
-    private String currentPath = "";
-    private String currentKind = ""; // "", "image", "pdf", "doc", "media"
-    private final List<FileEntry> folderItems = new ArrayList<>();
-    private int currentFileIndex = -1;
-    private final List<String> bookmarks = new ArrayList<>();
-    private boolean isModified = false;
+    // ---- Current file & folder state ----
+    String currentPath = "";
+    String currentKind = ""; // "", "image", "pdf", "doc", "media"
+    final List<FileEntry> folderItems = new ArrayList<>();
+    int currentFileIndex = -1;
+    final List<String> bookmarks = new ArrayList<>();
+    private String sortOrder = "name";
+    boolean isModified;
 
-    // Image Undo / Redo History State
+    // ---- Undo / Redo & Image adjustment state ----
     private static final class ImageSnapshot {
         final Bitmap bmp;
         final List<MarkupModel.Annotation> anns;
         ImageSnapshot(Bitmap b, List<MarkupModel.Annotation> a) {
-            // Pixel operations return a new bitmap; annotations have their own copy.
-            // Retaining the unchanged source avoids another full-resolution allocation.
             this.bmp = b;
             this.anns = MarkupModel.copyList(a);
         }
@@ -160,116 +140,89 @@ public class MainActivity extends Activity {
     private final List<List<MarkupModel.PdfPageItem>> pdfUndo = new ArrayList<>(), pdfRedo = new ArrayList<>();
     private String lastPdfKey = "";
 
-    // Color Adjustment Parameters
-    private float adjExp = 0f, adjCon = 0f, adjSat = 0f, adjWarm = 0f, adjSharp = 0f;
-    private boolean adjSepia = false, adjInvert = false;
-
-    // Instant Alpha Parameters
+    private float adjExp, adjCon, adjSat, adjWarm, adjSharp;
+    private boolean adjSepia, adjInvert;
     private int alphaTolerance = 32;
     private boolean alphaContiguous = true;
-
-    // Saved Signature Bitmaps
     private final List<Bitmap> savedSignatures = new ArrayList<>();
 
-    // Search / OCR State
-    private boolean searchBarOpen = false;
-    private String lastSearchQuery = "";
-    private final List<StageCanvasView.OcrBox> currentOcrBoxes = new ArrayList<>();
+    // ---- OCR & Search state ----
+    final List<StageCanvasView.OcrBox> currentOcrBoxes = new ArrayList<>();
     private int activeOcrHit = -1;
     private String fullExtractedOcrText = "";
+    private int docHitIndex = -1, docHitTotal = 0;
 
-    // Slideshow State
-    private boolean slideshowRunning = false;
-    private int slideshowIntervalSec = 3;
+    // ---- Slideshow state ----
+    private boolean slideshowRunning;
+    private FrameLayout slideshowOverlay;
+    private ImageView slideshowImageView;
+    private TextView slideshowCaptionView;
     private final Runnable slideshowRunnable = new Runnable() {
-        @Override
-        public void run() {
+        @Override public void run() {
             if (!slideshowRunning) return;
             navigateFile(1);
             mainHandler.postDelayed(this, slideshowIntervalSec * 1000L);
         }
     };
 
-    // Root & Structural Views
-    private FrameLayout rootFrame;
-    private LinearLayout topHeaderBar;
-    private TextView headerTitleView;
-    private TextView headerSubView;
-    private TextView uiModeChipView;
+    // ---- Prism Liquid Glass UI hierarchy ----
+    FrameLayout root;
+    Glass.Backdrop backdrop;
+    private FrameLayout pageHost;
+    Header header;
+    Dock dock;
+    private Sidebar sidebar;
+    private View dropOverlay;
 
-    private FrameLayout stageHostFrame;
-    private View emptyWelcomeView;
-    private StageCanvasView stageCanvasView;
-    private NativeDocView nativeDocView;
-    private NativeMediaView nativeMediaView;
+    private final Page[] pages = new Page[4];
+    private Pages.HomePage homePage;
+    private Pages.StagePage stagePage;
+    private Pages.FilesPage filesPage;
+    private Pages.SettingsPage settingsPage;
+    private Pages.SearchPage searchPage;
+    private int tab;
+    private boolean searching;
 
-    // Sidebars & Panels
-    private View mobileScrimView;
-    private LinearLayout sidebarContainer;
-    private LinearLayout sidebarListContainer;
-    private LinearLayout sidebarPdfActionRow;
-    private TextView tabBtnThumbs, tabBtnAnns, tabBtnBookmarks;
+    // ---- Core native stage views (kept alive across UI rebuilds) ----
+    StageCanvasView stageCanvasView;
+    NativeDocView nativeDocView;
+    NativeMediaView nativeMediaView;
+    FrameLayout stageHostFrame;
 
-    private LinearLayout infoPanelContainer;
-    private LinearLayout infoContentBody;
-
-    // Toolbars & Subbars
-    private LinearLayout floatingToolbarHost;
-    private LinearLayout subbarContainer;
-    private LinearLayout mainPillBar;
-
-    // Search Bar Overlay
-    private LinearLayout searchBarOverlay;
-    private EditText searchInputEdit;
-    private EditText replaceInputEdit;
-    private LinearLayout replaceRow;
-    private TextView searchCountLabel;
-
-    // Status Bar (Tablet UI)
-    private LinearLayout statusBarContainer;
-    private TextView statusLeftText;
-    private TextView statusCenterText;
-    private TextView statusRightText;
-
-    // Fullscreen Slideshow Overlay
-    private FrameLayout slideshowOverlay;
-    private ImageView slideshowImageView;
-    private TextView slideshowCaptionView;
+    // ---- Tablet sidebar animation state ----
+    private static boolean sidebarWanted;
+    private float sideP;
+    private ValueAnimator sideAnim;
+    private int contentInset = -1;
 
     public static final class FileEntry {
-        public final String path;
-        public final String name;
-        public final String kind;
-        public final long size;
-        public final long lastModified;
-
+        public final String path, name, kind;
+        public final long size, lastModified;
         public FileEntry(String path, String name, String kind, long size, long lastModified) {
-            this.path = path;
-            this.name = name;
-            this.kind = kind;
-            this.size = size;
-            this.lastModified = lastModified;
+            this.path = path; this.name = name; this.kind = kind; this.size = size; this.lastModified = lastModified;
         }
     }
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        prefs=getSharedPreferences("samsung_viewer_native_prefs",Context.MODE_PRIVATE);
-        boolean initialDark=prefs.getBoolean("system_theme",true)?(getResources().getConfiguration().uiMode&Configuration.UI_MODE_NIGHT_MASK)==Configuration.UI_MODE_NIGHT_YES:prefs.getBoolean("dark_theme",true);
-        setTheme(initialDark?android.R.style.Theme_DeviceDefault_NoActionBar:android.R.style.Theme_DeviceDefault_Light_NoActionBar);
+    private static FrameLayout.LayoutParams match() {
+        return new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+    }
+
+    @Override protected void onCreate(Bundle savedInstanceState) {
+        prefs = prefs(this);
+        Ui.init(this, prefs);
+        isDarkTheme = Ui.dark;
+        setTheme(Ui.dark ? android.R.style.Theme_DeviceDefault_NoActionBar : android.R.style.Theme_DeviceDefault_Light_NoActionBar);
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        prefs = getSharedPreferences("samsung_viewer_native_prefs", Context.MODE_PRIVATE);
+
         documents = new DocumentStore(this);
-        uiModePref = prefs.getString("ui_mode", "auto");
-        isDarkTheme = prefs.getBoolean("system_theme", true) ? (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES : prefs.getBoolean("dark_theme", true);
-        exportQuality = prefs.getInt("export_quality", 100); exportDpi = prefs.getInt("export_dpi", 300);
+        exportQuality = prefs.getInt("export_quality", 100);
+        exportDpi = prefs.getInt("export_dpi", 300);
         slideshowIntervalSec = prefs.getInt("slide_sec", 3);
         loadBookmarks();
-        OcrHost.init(this); PdfHost.init(this);
-        Updater.autoCheck(this);
+        OcrHost.init(this);
+        PdfHost.init(this);
 
-        // Prepare app-private working directories. Examples are created only when requested.
         File baseExt = getExternalFilesDir(null);
         if (baseExt == null) baseExt = getFilesDir();
         sampleDir = new File(baseExt, "SamsungViewer_Samples");
@@ -277,1766 +230,1273 @@ public class MainActivity extends Activity {
         inboxDir = new File(getCacheDir(), "inbox");
         if (!inboxDir.exists()) inboxDir.mkdirs();
 
-
-        // Initialize Reusable Core Views
         stageCanvasView = new StageCanvasView(this);
         nativeDocView = new NativeDocView(this);
         nativeMediaView = new NativeMediaView(this);
         bindCoreViewListeners();
 
-        // Build Adaptive Native UI (Tablet mirrors PC layout with left sidebar + top floating toolbar)
-        determineLayoutMode();
-        sidebarVisible = isTabletLayout;
-        infoVisible = false;
         buildCompleteNativeUI();
+
         foldObserver.start(this, bounds -> {
             if (java.util.Objects.equals(foldBounds, bounds)) return;
-            foldBounds = bounds; determineLayoutMode(); rebuildChromePreserveStage();
+            foldBounds = bounds;
+            if (homePage != null) homePage.rebuild();
+            fitHeader();
+            dock.invalidate();
         });
 
-        // Handle Incoming Intent or Open Sample Folder
+        if (savedInstanceState == null) {
+            root.postDelayed(() -> Updater.autoCheck(this), 2800);
+        }
+
         if (!handleIncomingIntent(getIntent())) {
-            if (savedInstanceState != null && savedInstanceState.getString("path") != null && !savedInstanceState.getString("path").isEmpty()) {
-                String original = savedInstanceState.getString("path"), draft = savedInstanceState.getString("draft");
-                openFileUnchecked(draft == null ? original : draft);
-                if (draft != null) { currentPath = original; isModified = true; if ("doc".equals(currentKind)) nativeDocView.markDraftRestored(); }
-                stageCanvasView.setZoom(savedInstanceState.getFloat("zoom", 1)); stageCanvasView.setCurrentPdfPage(savedInstanceState.getInt("page", 0));
-                String pending = savedInstanceState.getString("pending_export"); if (pending != null) pendingExportFile = new File(pending);
-                updateHeaderTitles();
+            if (savedInstanceState != null) {
+                String orig = savedInstanceState.getString("path");
+                String draft = savedInstanceState.getString("draft");
+                if (orig != null && !orig.isEmpty()) {
+                    openFileUnchecked(draft == null ? orig : draft);
+                    if (draft != null) {
+                        currentPath = orig;
+                        isModified = true;
+                        if ("doc".equals(currentKind)) nativeDocView.markDraftRestored();
+                    }
+                    stageCanvasView.setZoom(savedInstanceState.getFloat("zoom", 1f));
+                    stageCanvasView.setCurrentPdfPage(savedInstanceState.getInt("page", 0));
+                    String pending = savedInstanceState.getString("pending_export");
+                    if (pending != null) pendingExportFile = new File(pending);
+                    syncChromeState();
+                } else {
+                    int savedTab = savedInstanceState.getInt("tab", 0);
+                    switchTab(savedTab);
+                }
+                final Bundle st0 = savedInstanceState;
+                root.post(() -> screenChangeTransition(st0));
             }
         }
     }
-    @Override protected void onSaveInstanceState(Bundle state) {
-        state.putString("path", currentPath); state.putFloat("zoom", stageCanvasView.getZoom()); state.putInt("page", stageCanvasView.getCurrentPdfPage());
-        if (pendingExportFile != null) state.putString("pending_export", pendingExportFile.getAbsolutePath());
-        if (isModified && !saveRunning && !currentPath.isEmpty()) try {
-            File snapshot = ViewerExports.snapshot(this, currentPath, currentKind, stageCanvasView, nativeDocView, exportQuality, exportDpi);
-            File dir = new File(getFilesDir(), "drafts"); dir.mkdirs(); File draft = new File(dir, System.currentTimeMillis() + "_" + snapshot.getName());
-            java.nio.file.Files.move(snapshot.toPath(), draft.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING); state.putString("draft", draft.getAbsolutePath());
-        } catch (Exception ignored) {}
-        super.onSaveInstanceState(state);
-    }
-    @Override protected void onResume() { super.onResume();activityResumed=true;if(prefs!=null)consumeCapture(); }
-    @Override protected void onPause() { activityResumed=false;super.onPause(); stopSlideshow(); nativeMediaView.pauseMedia(); }
-    @Override protected void onDestroy() {
-        for (Runnable release : new ArrayList<>(dropPermissions)) release.run(); dropPermissions.clear(); cancelAfterSave();
-        openTicket++; imageLoadTicket++; searchTicket++; foldObserver.stop(); ocrPool.shutdownNow(); filePool.shutdownNow(); bgPool.shutdownNow(); mainHandler.removeCallbacksAndMessages(null);
-        nativeMediaView.stopMedia(); PdfHost.closeAll(); super.onDestroy();
+
+    /** Builds (or cleanly rebuilds) the full Prism Liquid Glass UI while preserving stage views & open files. */
+    void buildCompleteNativeUI() {
+        Ui.init(this, prefs);
+        isDarkTheme = Ui.dark;
+        applySystemBars();
+
+        // Detach reusable stage views cleanly before rebuilding the view hierarchy
+        detachFromParent(stageCanvasView);
+        detachFromParent(nativeDocView);
+        detachFromParent(nativeMediaView);
+        stageCanvasView.setDarkTheme(Ui.dark);
+        nativeDocView.setDarkTheme(Ui.dark);
+
+        root = new FrameLayout(this);
+        root.setTag("welcome-root");
+        root.setBackgroundColor(Ui.bg());
+
+        backdrop = new Glass.Backdrop(this);
+        backdrop.setBackgroundColor(Ui.bg());
+        root.addView(backdrop, match());
+
+        pageHost = new FrameLayout(this);
+        backdrop.addView(pageHost, match());
+
+        header = new Header(this, backdrop);
+        header.setListener(this);
+        root.addView(header, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, headerHeight()));
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            Ui.screenW = Math.max(1, r - l);
+            Ui.screenH = Math.max(1, b - t);
+            fitHeader();
+        });
+
+        dock = new Dock(this, backdrop, new String[]{"홈", "보기", "목록", "설정"});
+        dock.setListener(this);
+        root.addView(dock, match());
+
+        buildDropOverlay();
+        buildSlideshowOverlay();
+
+        homePage = new Pages.HomePage(this);
+        stagePage = new Pages.StagePage(this);
+        filesPage = new Pages.FilesPage(this);
+        settingsPage = new Pages.SettingsPage(this);
+        stageHostFrame = stagePage.stageContainer;
+
+        pages[0] = homePage;
+        pages[1] = stagePage;
+        pages[2] = filesPage;
+        pages[3] = settingsPage;
+        for (Page p : pages) {
+            p.setVisibility(View.GONE);
+            pageHost.addView(p, match());
+        }
+        searchPage = null;
+        searching = false;
+        sidebar = null;
+        sideP = 0f;
+        contentInset = -1;
+
+        setContentView(root);
+        configureFileDrop();
+
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            if (Build.VERSION.SDK_INT >= 30) {
+                int st = insets.getInsets(WindowInsets.Type.statusBars()).top;
+                int nav = insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
+                int ime = insets.getInsets(WindowInsets.Type.ime()).bottom;
+                boolean changed = st != Ui.statusInset || nav != Ui.navInset;
+                Ui.statusInset = st;
+                Ui.navInset = nav;
+                Ui.imeInset = ime;
+                dock.setImeOffset(ime);
+                fitHeader();
+                if (changed) {
+                    for (Page p : pages) if (p != null) p.applyInsets();
+                    if (searchPage != null) searchPage.applyInsets();
+                }
+                return WindowInsets.CONSUMED;
+            } else {
+                Ui.statusInset = insets.getSystemWindowInsetTop();
+                Ui.navInset = insets.getSystemWindowInsetBottom();
+                fitHeader();
+                for (Page p : pages) if (p != null) p.applyInsets();
+                return insets.consumeSystemWindowInsets();
+            }
+        });
+
+        // Exact Prism live glass invalidation hook
+        root.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                updateScrollChrome(currentPage());
+                boolean pageChanged = backdrop.isBackdropDirty();
+                if (pageChanged || header.animating()) header.invalidate();
+                if (dock.getVisibility() == View.VISIBLE && (pageChanged || dock.animating())) dock.invalidate();
+                for (int i = 0; i < root.getChildCount(); i++) {
+                    View c = root.getChildAt(i);
+                    if (c instanceof GlassMenu) c.invalidate();
+                }
+                return true;
+            }
+        });
+
+        int initialTab = hasOpenFile() ? 1 : Math.min(3, Math.max(0, tab));
+        if (!hasOpenFile() && initialTab == 1) initialTab = 0;
+        tab = initialTab;
+        pages[tab].setVisibility(View.VISIBLE);
+        pages[tab].show();
+        dock.select(tab, false);
+
+        attachActiveStageView();
+        syncChromeState();
+
+        if (sidebarWanted) root.post(() -> { if (tabletUi()) openSidebar(false); });
     }
 
-    @Override
-    protected void onNewIntent(Intent intent) {
+    private void applySystemBars() {
+        Window w = getWindow();
+        if (Build.VERSION.SDK_INT >= 30) {
+            w.setDecorFitsSystemWindows(false);
+        }
+        w.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        w.setStatusBarColor(Color.TRANSPARENT);
+        w.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= 29) w.setNavigationBarContrastEnforced(false);
+        w.getDecorView().setBackgroundColor(Ui.bg());
+        if (Build.VERSION.SDK_INT >= 30 && w.getInsetsController() != null) {
+            int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            w.getInsetsController().setSystemBarsAppearance(Ui.dark ? 0 : mask, mask);
+        } else {
+            int mask = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            int flags = w.getDecorView().getSystemUiVisibility();
+            w.getDecorView().setSystemUiVisibility(Ui.dark ? (flags & ~mask) : (flags | mask));
+        }
+    }
+
+    private int headerHeight() {
+        int W = root != null && root.getWidth() > 0 ? root.getWidth() : Ui.screenW;
+        int H = root != null && root.getHeight() > 0 ? root.getHeight() : Ui.screenH;
+        return Ui.statusInset + Ui.dp(Dock.railFor(W, H) ? 172 : 88);
+    }
+
+    private void fitHeader() {
+        if (header == null || header.getLayoutParams() == null) return;
+        int h = headerHeight();
+        if (header.getLayoutParams().height == h) return;
+        header.getLayoutParams().height = h;
+        header.post(header::requestLayout);
+    }
+
+    private static void detachFromParent(View v) {
+        if (v != null && v.getParent() instanceof ViewGroup) ((ViewGroup) v.getParent()).removeView(v);
+    }
+
+    // ---- Drag-and-drop overlay & Slideshow overlay ----
+    private void buildDropOverlay() {
+        LinearLayout ov = new LinearLayout(this);
+        ov.setTag("file-drop-overlay");
+        ov.setOrientation(LinearLayout.VERTICAL);
+        ov.setGravity(Gravity.CENTER);
+        ov.setBackgroundColor(Ui.dark ? 0xCC0A0D14 : 0xCCF2F5FA);
+        ov.setPadding(Ui.dp(32), Ui.dp(32), Ui.dp(32), Ui.dp(32));
+        ov.setVisibility(View.GONE);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(Ui.dp(28), Ui.dp(28), Ui.dp(28), Ui.dp(28));
+        GradientDrawable bg = Ui.round(Ui.card(), 26);
+        bg.setStroke(Ui.dp(2), Ui.ACCENT);
+        card.setBackground(bg);
+        card.addView(new Icons.IconView(this, Icons.OPEN_FILE, 42, Ui.ACCENT), new LinearLayout.LayoutParams(Ui.dp(48), Ui.dp(48)));
+        TextView t = Ui.text(this, "여기에 놓아서 열기", 19, Ui.bold, Ui.text());
+        t.setPadding(0, Ui.dp(12), 0, Ui.dp(4));
+        card.addView(t);
+        card.addView(Ui.text(this, "이미지 · PDF · 문서 · 미디어", 13.5f, Ui.regular, Ui.text2()));
+        ov.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        dropOverlay = ov;
+        root.addView(dropOverlay, match());
+    }
+
+    private void configureFileDrop() {
+        root.setOnDragListener((v, event) -> {
+            switch (event.getAction()) {
+                case DragEvent.ACTION_DRAG_STARTED:
+                    return FileDrop.accepts(event.getClipDescription());
+                case DragEvent.ACTION_DRAG_ENTERED:
+                case DragEvent.ACTION_DRAG_LOCATION:
+                    if (dropOverlay != null) dropOverlay.setVisibility(View.VISIBLE);
+                    return true;
+                case DragEvent.ACTION_DRAG_EXITED:
+                case DragEvent.ACTION_DRAG_ENDED:
+                    if (dropOverlay != null) dropOverlay.setVisibility(View.GONE);
+                    return true;
+                case DragEvent.ACTION_DROP: {
+                    if (dropOverlay != null) dropOverlay.setVisibility(View.GONE);
+                    List<Uri> uris = FileDrop.collect(event.getClipData());
+                    if (uris.isEmpty()) return false;
+                    final android.view.DragAndDropPermissions perm = requestDragAndDropPermissions(event);
+                    Runnable release = FileDrop.once(() -> {
+                        if (perm != null) { try { perm.release(); } catch (Throwable ignored) {} }
+                    });
+                    synchronized (dropPermissions) { dropPermissions.add(release); }
+                    openUris(uris, Intent.FLAG_GRANT_READ_URI_PERMISSION, () -> {
+                        synchronized (dropPermissions) { dropPermissions.remove(release); }
+                        release.run();
+                    });
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+
+    private void buildSlideshowOverlay() {
+        slideshowOverlay = new FrameLayout(this);
+        slideshowOverlay.setBackgroundColor(0xFF000000);
+        slideshowOverlay.setVisibility(View.GONE);
+        slideshowImageView = new ImageView(this);
+        slideshowImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        slideshowOverlay.addView(slideshowImageView, match());
+        slideshowCaptionView = Ui.text(this, "", 14, Ui.semibold, 0xFFFFFFFF);
+        slideshowCaptionView.setGravity(Gravity.CENTER);
+        slideshowCaptionView.setPadding(Ui.dp(18), Ui.dp(10), Ui.dp(18), Ui.dp(10));
+        slideshowCaptionView.setBackground(Ui.round(0x88000000, 100));
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        clp.bottomMargin = Ui.navInset + Ui.dp(28);
+        slideshowOverlay.addView(slideshowCaptionView, clp);
+        slideshowOverlay.setOnClickListener(v -> stopSlideshow());
+        root.addView(slideshowOverlay, match());
+    }
+
+    // ---- Activity lifecycle & fold transition ----
+    private static Bitmap lastFrame;
+
+    @Override protected void onSaveInstanceState(Bundle out) {
+        out.putInt("tab", tab);
+        out.putString("path", currentPath);
+        out.putFloat("zoom", stageCanvasView != null ? stageCanvasView.getZoom() : 1f);
+        out.putInt("page", stageCanvasView != null ? stageCanvasView.getCurrentPdfPage() : 0);
+        if (pendingExportFile != null) out.putString("pending_export", pendingExportFile.getAbsolutePath());
+        if (dock != null && dock.getWidth() > 0) out.putFloatArray("dock_geo", dock.snapshot());
+        if (header != null) { float[] hg = header.snapshot(); if (hg != null) out.putFloatArray("hdr_geo", hg); }
+        lastFrame = isChangingConfigurations() ? captureFrame() : null;
+        if (isModified && !saveRunning && !currentPath.isEmpty()) {
+            try {
+                File snapshot = ViewerExports.snapshot(this, currentPath, currentKind, stageCanvasView, nativeDocView, exportQuality, exportDpi);
+                File dir = new File(getFilesDir(), "drafts");
+                dir.mkdirs();
+                File draft = new File(dir, System.currentTimeMillis() + "_" + snapshot.getName());
+                Files.move(snapshot.toPath(), draft.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                out.putString("draft", draft.getAbsolutePath());
+            } catch (Exception ignored) {}
+        }
+        super.onSaveInstanceState(out);
+    }
+
+    private Bitmap captureFrame() {
+        try {
+            int w = root.getWidth(), h = root.getHeight();
+            if (w <= 0 || h <= 0) return null;
+            float s = 0.5f;
+            Bitmap b = Bitmap.createBitmap((int) (w * s), (int) (h * s), Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(b);
+            c.scale(s, s);
+            root.draw(c);
+            return b;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private void screenChangeTransition(Bundle state) {
+        Bitmap frame = lastFrame;
+        lastFrame = null;
+        float[] g = state.getFloatArray("dock_geo");
+        if (g == null) return;
+        boolean grew = Ui.screenW > g[0] * 1.08f;
+        boolean shrank = Ui.screenW < g[0] * 0.92f;
+        boolean reshaped = Math.abs(Ui.screenH - g[1]) > g[1] * 0.08f;
+        if (!grew && !shrank && !reshaped) return;
+        if (frame != null) {
+            ImageView old = new ImageView(this);
+            old.setImageBitmap(frame);
+            old.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            root.addView(old, match());
+            old.animate().alpha(0f).scaleX(grew ? 1.06f : 0.96f).scaleY(grew ? 1.06f : 0.96f)
+                    .setDuration(280).setInterpolator(Ui.DECEL)
+                    .withEndAction(() -> { root.removeView(old); frame.recycle(); }).start();
+        }
+        float from = grew ? 0.92f : 1.06f;
+        pageHost.setAlpha(0f);
+        pageHost.setScaleX(from); pageHost.setScaleY(from);
+        pageHost.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(520).setInterpolator(Ui.EMPHASIZED).start();
+        float[] hg = state.getFloatArray("hdr_geo");
+        if (hg != null) header.morphFrom(hg);
+        dock.morphFrom(g);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        activityResumed = true;
+        if (prefs != null) consumeCapture();
+    }
+
+    @Override protected void onPause() {
+        activityResumed = false;
+        super.onPause();
+        stopSlideshow();
+        if (nativeMediaView != null) nativeMediaView.pauseMedia();
+    }
+
+    @Override protected void onDestroy() {
+        synchronized (dropPermissions) {
+            for (Runnable r : new ArrayList<>(dropPermissions)) r.run();
+            dropPermissions.clear();
+        }
+        cancelAfterSave();
+        openTicket++; imageLoadTicket++; searchTicket++;
+        foldObserver.stop();
+        ocrPool.shutdownNow();
+        filePool.shutdownNow();
+        bgPool.shutdownNow();
+        mainHandler.removeCallbacksAndMessages(null);
+        if (nativeMediaView != null) nativeMediaView.stopMedia();
+        PdfHost.closeAll();
+        super.onDestroy();
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
         handleIncomingIntent(intent);
     }
 
-    @Override
-    public void onConfigurationChanged(Configuration newConfig) {
+    @Override public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        if (prefs.getBoolean("system_theme", true)) isDarkTheme = (newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
-        boolean prevTablet = isTabletLayout;
-        determineLayoutMode();
-        if (prevTablet != isTabletLayout) {
-            sidebarVisible = isTabletLayout;
-            infoVisible = false;
-        }
-        rebuildChromePreserveStage();
+        Ui.init(this, prefs);
+        isDarkTheme = Ui.dark;
+        buildCompleteNativeUI();
     }
 
-    @Override
-    public void onBackPressed() {
-        if (slideshowRunning) {
-            stopSlideshow();
+    @Override public void onBackPressed() {
+        if (GlassMenu.dismissAny(root)) return;
+        if (slideshowRunning) { stopSlideshow(); return; }
+        if (searching) { onExitSearch(); return; }
+        if (tab == 1 && hasOpenFile()) {
+            if (!"hand".equals(stageCanvasView.getActiveTool())) {
+                setTool("hand");
+                return;
+            }
+            if ("doc".equals(currentKind) && nativeDocView.isEditing()) {
+                nativeDocView.setEditing(false);
+                syncChromeState();
+                return;
+            }
+            switchTab(0);
             return;
         }
-        if (searchBarOpen) {
-            closeSearchBar();
+        if (tab != 0) { switchTab(0); return; }
+        guardChanges(this::finish);
+    }
+
+    // ---- Navigation & Prism Chrome Coordination ----
+    boolean hasOpenFile() { return currentPath != null && !currentPath.isEmpty(); }
+    boolean tabletUi() {
+        int W = root != null && root.getWidth() > 0 ? root.getWidth() : Ui.screenW;
+        int H = root != null && root.getHeight() > 0 ? root.getHeight() : Ui.screenH;
+        return Dock.tabletFor(W, H);
+    }
+
+    int sideInset() {
+        int W = root != null && root.getWidth() > 0 ? root.getWidth() : Ui.screenW;
+        int H = root != null && root.getHeight() > 0 ? root.getHeight() : Ui.screenH;
+        return Dock.railFor(W, H) ? Ui.dp(20 + 64 + 12) : 0;
+    }
+
+    int bottomPadding() { return dock == null ? Ui.dp(180) : dock.chromeHeight() + Ui.dp(14); }
+    int contentInsetPx() { return Math.max(0, contentInset); }
+
+    Page currentPage() {
+        if (searching && searchPage != null) return searchPage;
+        return pages[tab];
+    }
+
+    void switchToViewerTab() { switchTab(1); }
+
+    void openFilesFilter(int filterIdx) {
+        switchTab(2);
+        if (filesPage != null) filesPage.setFilter(filterIdx);
+    }
+
+    void switchTab(int i) {
+        i = Math.max(0, Math.min(3, i));
+        if (i == tab && !searching) {
+            if (pages[i] != null) pages[i].scrollToTop();
             return;
         }
-        if (!isTabletLayout && (sidebarVisible || infoVisible)) {
-            sidebarVisible = false;
-            infoVisible = false;
-            updateDrawerAndPanelVisibility();
+        if (searching) onExitSearch();
+        Page from = pages[tab], to = pages[i];
+        tab = i;
+        if (dock != null && dock.selected != i) dock.select(i, true);
+        if (from != null && from != to) {
+            from.animate().cancel();
+            from.animate().alpha(0f).setDuration(140).withEndAction(() -> {
+                from.setVisibility(View.GONE);
+                from.setAlpha(1f);
+            }).start();
+        }
+        if (to != null) {
+            to.animate().cancel();
+            to.setVisibility(View.VISIBLE);
+            to.setAlpha(0f);
+            to.setScaleX(0.985f);
+            to.setScaleY(0.985f);
+            to.show();
+            to.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(50).setDuration(290).setInterpolator(Ui.EMPHASIZED).start();
+        }
+        if (sidebar != null) sidebar.setSelected(i);
+        if (tab == 2 && filesPage != null) filesPage.refresh();
+        if (dock != null) dock.setCollapsed(false);
+        syncChromeState();
+    }
+
+    private float collapseAcc;
+
+    void onPageScroll(Page p, int y, int dy) {
+        if (p != currentPage()) return;
+        updateScrollChrome(p);
+        if (dock.inSearch()) { dock.hideIme(); return; }
+        if ((dy > 0) != (collapseAcc > 0)) collapseAcc = 0;
+        collapseAcc += dy;
+        if (y < Ui.dp(60)) dock.setCollapsed(false);
+        else if (collapseAcc > Ui.dp(28)) dock.setCollapsed(true);
+        else if (collapseAcc < -Ui.dp(14)) dock.setCollapsed(false);
+    }
+
+    private void updateScrollChrome(Page p) {
+        if (p == null || header == null) return;
+        float t = p.titleProgress();
+        header.setScroll(t, p.blurProgress());
+        if (p.bigTitle != null) p.bigTitle.setAlpha(1f - t);
+    }
+
+    void syncChromeState() {
+        if (header == null || dock == null) return;
+        Page p = currentPage();
+        if (p == stagePage) {
+            String t = hasOpenFile() ? ((isModified ? "● " : "") + new File(currentPath).getName()) : "보기";
+            stagePage.title = t;
+            stagePage.back = hasOpenFile();
+            stagePage.headerIcons = hasOpenFile() ? new int[]{Icons.INFO, Icons.MORE} : new int[]{Icons.OPEN_FILE, Icons.MORE};
+        }
+        header.configure(p.title, p.headerIcons, p.back);
+        updateScrollChrome(p);
+
+        Dock.ToolSlot[] slots = buildToolSlots();
+        String name = hasOpenFile() ? new File(currentPath).getName() : "";
+        String meta = buildFileMetaSummary();
+        dock.setFileState(hasOpenFile(), tab == 1, name, meta, Pages.iconForKind(currentKind), isModified, slots);
+        refreshSubToolBar();
+    }
+
+    private String buildFileMetaSummary() {
+        if (!hasOpenFile()) return "";
+        File f = new File(currentPath);
+        String pos = folderItems.size() > 1 ? ((currentFileIndex + 1) + "/" + folderItems.size() + " · ") : "";
+        if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
+            Bitmap b = stageCanvasView.getImageBitmap();
+            return pos + b.getWidth() + "×" + b.getHeight() + " · " + Math.round(stageCanvasView.getZoom() * 100f) + "%";
+        }
+        if ("pdf".equals(currentKind)) {
+            int p = stageCanvasView.getCurrentPdfPage() + 1;
+            int tot = Math.max(1, stageCanvasView.getPdfPages().size());
+            return pos + "PDF " + p + "/" + tot + " · " + Math.round(stageCanvasView.getZoom() * 100f) + "%";
+        }
+        if ("doc".equals(currentKind)) {
+            return pos + Util.extOf(currentPath).toUpperCase(Locale.ROOT).replace(".", "") + " · " + Math.round(nativeDocView.getZoomScale() * 100f) + "%";
+        }
+        return pos + fmtBytes(f.length());
+    }
+
+    private Dock.ToolSlot[] buildToolSlots() {
+        String activeTool = stageCanvasView != null ? stageCanvasView.getActiveTool() : "hand";
+        if ("doc".equals(currentKind)) {
+            boolean ed = nativeDocView != null && nativeDocView.isEditing();
+            return new Dock.ToolSlot[]{
+                    new Dock.ToolSlot(Icons.EDIT, ed ? "완료" : "편집", ed),
+                    new Dock.ToolSlot(Icons.UNDO, "취소", false),
+                    new Dock.ToolSlot(Icons.ZOOM_IN, "배율", false),
+                    new Dock.ToolSlot(Icons.SEARCH, "찾기", false),
+                    new Dock.ToolSlot(Icons.SAVE, "저장", isModified)
+            };
+        }
+        if ("pdf".equals(currentKind)) {
+            return new Dock.ToolSlot[]{
+                    new Dock.ToolSlot(Icons.PEN, "마커", "markup".equals(activeTool)),
+                    new Dock.ToolSlot(Icons.PAGES, "페이지", false),
+                    new Dock.ToolSlot(Icons.OCR, "OCR", !currentOcrBoxes.isEmpty()),
+                    new Dock.ToolSlot(Icons.FIT, "맞춤", false),
+                    new Dock.ToolSlot(Icons.SAVE, "저장", isModified)
+            };
+        }
+        if ("media".equals(currentKind)) {
+            return new Dock.ToolSlot[]{
+                    new Dock.ToolSlot(Icons.PREV, "이전", false),
+                    new Dock.ToolSlot(Icons.NEXT, "다음", false),
+                    new Dock.ToolSlot(Icons.BOOKMARK, bookmarks.contains(currentPath) ? "저장됨" : "책갈피", bookmarks.contains(currentPath)),
+                    new Dock.ToolSlot(Icons.SHARE, "공유", false),
+                    new Dock.ToolSlot(Icons.MORE, "더보기", false)
+            };
+        }
+        // Image mode
+        boolean editOn = "crop".equals(activeTool) || "adjust".equals(activeTool) || "alpha".equals(activeTool) || "select".equals(activeTool);
+        return new Dock.ToolSlot[]{
+                new Dock.ToolSlot(Icons.PEN, "마커", "markup".equals(activeTool)),
+                new Dock.ToolSlot(Icons.CROP, "편집", editOn),
+                new Dock.ToolSlot(Icons.OCR, "OCR", !currentOcrBoxes.isEmpty()),
+                new Dock.ToolSlot(Icons.FIT, "맞춤", false),
+                new Dock.ToolSlot(Icons.SAVE, "저장", isModified)
+        };
+    }
+
+    /** Floating sub-tool glass pill shown when Crop / Markup / Alpha / Select / Doc Edit is active. */
+    private void refreshSubToolBar() {
+        if (stagePage == null) return;
+        LinearLayout row = stagePage.subToolRow;
+        row.removeAllViews();
+        if (!hasOpenFile() || tab != 1) {
+            stagePage.subToolHost.setVisibility(View.GONE);
             return;
         }
-        if (!"hand".equals(stageCanvasView.getActiveTool())) {
-            setTool("hand");
+        String tool = stageCanvasView.getActiveTool();
+        if ("markup".equals(tool)) {
+            stagePage.subToolHost.setVisibility(View.VISIBLE);
+            String cur = stageCanvasView.getMarkupKind();
+            String[][] kinds = {{"pen", "펜"}, {"hl", "형광"}, {"arrow", "화살"}, {"rect", "사각"}, {"ellipse", "원"}, {"text", "글자"}, {"sign", "서명"}, {"redact", "가림"}, {"select", "선택"}};
+            for (String[] k : kinds) {
+                row.addView(subChip(k[1], k[0].equals(cur), v -> { applyMarkupKind(k[0]); refreshSubToolBar(); }));
+            }
+            int[] colors = {0xFFE53935, 0xFF0381FE, 0xFF28B457, 0xFFF2C94C, 0xFF111111, 0xFFFFFFFF};
+            for (int col : colors) {
+                View sw = new View(this);
+                GradientDrawable d = Ui.round(col, 100);
+                d.setStroke(Ui.dp(stageCanvasView.getMarkupColor() == col ? 2.5f : 1f),
+                        stageCanvasView.getMarkupColor() == col ? Ui.ACCENT : 0x55888888);
+                sw.setBackground(d);
+                sw.setOnClickListener(v -> { applyMarkupColor(col); refreshSubToolBar(); });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(24), Ui.dp(24));
+                lp.leftMargin = Ui.dp(4); lp.rightMargin = Ui.dp(4);
+                row.addView(sw, lp);
+            }
+            row.addView(subChip("취소", false, v -> { if ("pdf".equals(currentKind)) undoPdf(false); else undoImageEdit(); }));
+            row.addView(subChip("완료", true, v -> setTool("hand")));
+            return;
+        }
+        if ("crop".equals(tool)) {
+            stagePage.subToolHost.setVisibility(View.VISIBLE);
+            row.addView(subChip("자유", false, v -> stageCanvasView.setCropAspect(0f)));
+            row.addView(subChip("1:1", false, v -> stageCanvasView.setCropAspect(1f)));
+            row.addView(subChip("4:3", false, v -> stageCanvasView.setCropAspect(4f / 3f)));
+            row.addView(subChip("16:9", false, v -> stageCanvasView.setCropAspect(16f / 9f)));
+            row.addView(subChip("자르기 적용", true, v -> applyCrop()));
+            row.addView(subChip("취소", false, v -> setTool("hand")));
+            return;
+        }
+        if ("alpha".equals(tool)) {
+            stagePage.subToolHost.setVisibility(View.VISIBLE);
+            row.addView(subChip("배경 터치하여 제거", false, null));
+            row.addView(subChip(alphaContiguous ? "인접 영역" : "전체 동일색", true, v -> { alphaContiguous = !alphaContiguous; refreshSubToolBar(); }));
+            row.addView(subChip("완료", false, v -> setTool("hand")));
+            return;
+        }
+        if ("select".equals(tool)) {
+            stagePage.subToolHost.setVisibility(View.VISIBLE);
+            row.addView(subChip("영역 복사", true, v -> copyCurrentImage()));
+            row.addView(subChip("완료", false, v -> setTool("hand")));
             return;
         }
         if ("doc".equals(currentKind) && nativeDocView.isEditing()) {
-            nativeDocView.setEditing(false);
-            refreshToolbars();
+            stagePage.subToolHost.setVisibility(View.VISIBLE);
+            row.addView(subChip("실행 취소", false, v -> nativeDocView.undo()));
+            row.addView(subChip("다시 실행", false, v -> nativeDocView.redo()));
+            row.addView(subChip("편집 완료", true, v -> { nativeDocView.setEditing(false); syncChromeState(); }));
             return;
         }
-        guardChanges(() -> finish());
+        stagePage.subToolHost.setVisibility(View.GONE);
     }
 
-    private int dp(float v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+    private TextView subChip(String label, boolean active, View.OnClickListener click) {
+        TextView tv = Ui.text(this, label, 12.5f, active ? Ui.bold : Ui.semibold, active ? 0xFFFFFFFF : Ui.text());
+        tv.setGravity(Gravity.CENTER);
+        tv.setPadding(Ui.dp(12), Ui.dp(6), Ui.dp(12), Ui.dp(6));
+        tv.setBackground(Ui.round(active ? Ui.ACCENT : Ui.chip(), 100));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, Ui.dp(32));
+        lp.leftMargin = Ui.dp(3); lp.rightMargin = Ui.dp(3);
+        tv.setLayoutParams(lp);
+        if (click != null) { tv.setOnClickListener(click); Ui.press(tv, 0.94f); }
+        return tv;
     }
 
-    private void toast(final String msg) {
-        mainHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
+    private void applyCrop() {
+        Bitmap src = stageCanvasView.getImageBitmap();
+        RectF r = stageCanvasView.getCropRect();
+        if (src == null || r == null || r.width() < 2 || r.height() < 2) { setTool("hand"); return; }
+        pushImageUndo();
+        Bitmap cropped = ImageEditOps.crop(src, r);
+        stageCanvasView.setImageContent(cropped, null, stageCanvasView.getImageAnnotations(), true);
+        markModified();
+        setTool("hand");
+        toast("이미지를 잘랐습니다");
+    }
+
+    // ---- Dock.Listener ----
+    @Override public void onTab(int index, boolean reselect) {
+        if (searching) { onExitSearch(); dock.select(index, true); }
+        if (reselect) {
+            if (pages[index] != null) pages[index].scrollToTop();
+            return;
+        }
+        switchTab(index);
+    }
+
+    @Override public void onOpenCurrentViewer() {
+        if (hasOpenFile()) switchTab(1);
+    }
+
+    @Override public void onMiniQuickAction(int which, RectF anchor) {
+        if (which == Dock.QUICK_SAVE) saveCurrentFile(false);
+        else if (which == Dock.QUICK_CLOSE) closeCurrentFile();
+    }
+
+    @Override public void onToolAction(int slotIndex, RectF anchor) {
+        if (!hasOpenFile()) return;
+        if ("doc".equals(currentKind)) {
+            switch (slotIndex) {
+                case 0:
+                    if (!nativeDocView.canEdit()) { toast("이 문서 형식은 읽기 전용입니다"); return; }
+                    nativeDocView.setEditing(!nativeDocView.isEditing());
+                    syncChromeState();
+                    break;
+                case 1: nativeDocView.undo(); break;
+                case 2: showZoomMenu(anchor); break;
+                case 3: onSearch(); break;
+                case 4: saveCurrentFile(false); break;
             }
+            return;
+        }
+        if ("media".equals(currentKind)) {
+            switch (slotIndex) {
+                case 0: navigateFile(-1); break;
+                case 1: navigateFile(1); break;
+                case 2: toggleBookmark(currentPath); break;
+                case 3: shareCurrentFile(); break;
+                case 4: showOverflowGlassMenu(anchor); break;
+            }
+            return;
+        }
+        if ("pdf".equals(currentKind)) {
+            switch (slotIndex) {
+                case 0:
+                    if ("markup".equals(stageCanvasView.getActiveTool())) setTool("hand");
+                    else showMarkupMenu(anchor);
+                    break;
+                case 1: showPdfMenu(anchor); break;
+                case 2: showOcrMenu(anchor); break;
+                case 3: showZoomMenu(anchor); break;
+                case 4: showSaveExportMenu(anchor); break;
+            }
+            return;
+        }
+        // Image mode
+        switch (slotIndex) {
+            case 0:
+                if ("markup".equals(stageCanvasView.getActiveTool())) setTool("hand");
+                else showMarkupMenu(anchor);
+                break;
+            case 1: showImageEditMenu(anchor); break;
+            case 2: showOcrMenu(anchor); break;
+            case 3: showZoomMenu(anchor); break;
+            case 4: showSaveExportMenu(anchor); break;
+        }
+    }
+
+    @Override public void onSearch() {
+        if (searchPage == null) {
+            searchPage = new Pages.SearchPage(this);
+            pageHost.addView(searchPage, match());
+        }
+        searching = true;
+        searchPage.setVisibility(View.VISIBLE);
+        searchPage.show();
+        searchPage.query("", false);
+        searchPage.setAlpha(0f);
+        searchPage.setTranslationY(Ui.dp(16));
+        searchPage.animate().alpha(1f).translationY(0).setDuration(320).setInterpolator(Ui.EMPHASIZED).start();
+        dock.setSearchMode(true);
+        syncChromeState();
+    }
+
+    @Override public void onExitSearch() {
+        searching = false;
+        dock.setSearchMode(false);
+        if (searchPage != null) {
+            Pages.SearchPage s = searchPage;
+            s.animate().alpha(0f).setDuration(200).withEndAction(() -> s.setVisibility(View.GONE)).start();
+        }
+        header.post(this::syncChromeState);
+    }
+
+    @Override public void onQuery(String q, boolean submit) {
+        if (searchPage != null) searchPage.query(q, submit);
+    }
+
+    // ---- Tablet Sidebar (exact Prism) ----
+    @Override public void onSidebar() { if (sideP > 0.5f) closeSidebar(); else openSidebar(true); }
+
+    void openSidebar(boolean animate) {
+        if (!tabletUi()) return;
+        if (searching) onExitSearch();
+        sidebarWanted = true;
+        int W = root.getWidth() > 0 ? root.getWidth() : Ui.screenW;
+        float sw = Sidebar.widthFor(W);
+        if (sidebar == null) {
+            sidebar = new Sidebar(this);
+            root.addView(sidebar, root.indexOfChild(backdrop) + 1, new FrameLayout.LayoutParams((int) sw, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        sidebar.getLayoutParams().width = (int) sw;
+        sidebar.setSelected(tab);
+        sidebar.setVisibility(View.VISIBLE);
+        setContentInset((int) sw);
+        animateSidebar(1f, animate);
+    }
+
+    void closeSidebar() {
+        sidebarWanted = false;
+        if (sidebar == null || sideP <= 0f) return;
+        animateSidebar(0f, true);
+    }
+
+    private void animateSidebar(float to, boolean animate) {
+        if (sideAnim != null) sideAnim.cancel();
+        if (!animate) { applySidebar(to); if (to == 0f) finishCloseSidebar(); return; }
+        sideAnim = Ui.animate(sideP, to, to > 0 ? 440 : 360, Ui.EMPHASIZED, a -> applySidebar((float) a.getAnimatedValue()));
+        sideAnim.addListener(new AnimatorListenerAdapter() {
+            boolean canceled;
+            @Override public void onAnimationCancel(Animator a) { canceled = true; }
+            @Override public void onAnimationEnd(Animator a) { if (!canceled && to == 0f) finishCloseSidebar(); }
         });
     }
 
-    private void determineLayoutMode() {
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        int width = Build.VERSION.SDK_INT >= 30 ? getWindowManager().getCurrentWindowMetrics().getBounds().width() : dm.widthPixels;
-        windowWidthDp = width / dm.density;
-        bookLayout = foldBounds != null && foldBounds.height() > foldBounds.width() && AdaptiveLayout.book(windowWidthDp, foldBounds.left / dm.density, foldBounds.right / dm.density, foldBounds.height() / dm.density);
-        boolean tabletop = foldBounds != null && foldBounds.width() > foldBounds.height();
-        isTabletLayout = !tabletop && (bookLayout || AdaptiveLayout.tablet(windowWidthDp, uiModePref));
+    private void applySidebar(float p) {
+        sideP = p;
+        float sw = sidebar == null ? 0 : sidebar.getLayoutParams().width;
+        if (sidebar != null) sidebar.setTranslationX(-sw * (1f - p));
+        float dx = -sw * (1f - p);
+        pageHost.setTranslationX(dx);
+        header.setTranslationX(dx);
+        dock.setSidebar(sw, p);
     }
 
-    private void toggleUiModeManual() {
-        final String[] values = {"auto", "mobile", "tablet"};
-        int selected = java.util.Arrays.asList(values).indexOf(uiModePref);
-        new AlertDialog.Builder(this).setTitle("화면 배치").setSingleChoiceItems(new String[]{"기기와 창 크기에 맞춤", "모바일 배치", "넓은 화면 배치 (600dp 이상)"}, selected, (dialog, which) -> {
-            uiModePref = values[which]; prefs.edit().putString("ui_mode", uiModePref).apply(); determineLayoutMode();
-            sidebarVisible = isTabletLayout; infoVisible = false; dialog.dismiss(); rebuildChromePreserveStage();
-        }).setNegativeButton("닫기", null).show();
+    private void finishCloseSidebar() {
+        sideP = 0f;
+        if (sidebar != null) sidebar.setVisibility(View.GONE);
+        setContentInset(0);
+        pageHost.setTranslationX(0);
+        header.setTranslationX(0);
+        dock.setSidebar(0, 0);
     }
 
-    private void applySystemBarColors() {
-        try {
-            setTheme(isDarkTheme?android.R.style.Theme_DeviceDefault_NoActionBar:android.R.style.Theme_DeviceDefault_Light_NoActionBar);
-            Window w = getWindow();
-            w.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-            int bg = currentPath.isEmpty() ? (isDarkTheme?0xFF171C1A:0xFFF2F3F5) : (isDarkTheme?0xFF0E1015:0xFFF2F4F8);
-            w.setStatusBarColor(bg);
-            w.setNavigationBarColor(bg);
-            if(Build.VERSION.SDK_INT>=30 && w.getInsetsController()!=null) {
-                int mask=WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
-                w.getInsetsController().setSystemBarsAppearance(isDarkTheme?0:mask,mask);
-            }else{int mask=View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;int flags=w.getDecorView().getSystemUiVisibility();w.getDecorView().setSystemUiVisibility(isDarkTheme?flags&~mask:flags|mask);}
-        } catch (Exception ignored) {}
+    private void setContentInset(int px) {
+        if (px == contentInset) return;
+        contentInset = px;
+        ((FrameLayout.LayoutParams) pageHost.getLayoutParams()).leftMargin = px;
+        pageHost.requestLayout();
+        ((FrameLayout.LayoutParams) header.getLayoutParams()).leftMargin = px;
+        header.requestLayout();
     }
 
-    // ---------- Bind Stage & Document Callbacks ----------
+    void sidebarSearch() {
+        closeSidebar();
+        root.postDelayed(this::onSearch, 280);
+    }
+
+    void sidebarTab(int i) { onTab(i, i == tab); }
+
+    // ---- Header.Listener ----
+    @Override public void onBack() {
+        if (tab == 1) switchTab(0);
+    }
+
+    @Override public void onHeaderButton(int icon, RectF anchor) {
+        if (icon == Icons.OPEN_FILE) { launchSystemFilePicker(); return; }
+        if (icon == Icons.FOLDER) { chooseFolder(); return; }
+        if (icon == Icons.INFO) { showFileInfoDialog(); return; }
+        if (icon == Icons.DOWNLOAD) { Updater.checkInteractive(this); return; }
+        if (icon == Icons.SORT) { showSortGlassMenu(anchor); return; }
+        if (icon == Icons.MORE) { showOverflowGlassMenu(anchor); }
+    }
+
+    // ---- Drop-Morphing GlassMenu Palettes ----
+    GlassMenu showOverflowGlassMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = new ArrayList<>();
+        list.add(new GlassMenu.Entry("파일 열기", Icons.OPEN_FILE, false, this::launchSystemFilePicker));
+        list.add(new GlassMenu.Entry("폴더 열기", Icons.FOLDER, false, this::chooseFolder));
+        list.add(new GlassMenu.Entry("화면 캡처", Icons.CAPTURE, false, this::launchScreenCapture));
+        list.add(new GlassMenu.Entry("붙여넣기", Icons.PASTE, false, this::pasteClipboardImage));
+        if (hasOpenFile()) {
+            list.add(new GlassMenu.Entry("저장", Icons.SAVE, isModified, () -> saveCurrentFile(false)));
+            list.add(new GlassMenu.Entry("다른 이름으로 저장 · 변환", Icons.EXPORT, false, () -> showExportGlassMenu(anchor)));
+            if ("image".equals(currentKind) || "pdf".equals(currentKind)) {
+                list.add(new GlassMenu.Entry("이미지 복사", Icons.COPY, false, this::copyCurrentImage));
+            }
+            list.add(new GlassMenu.Entry("인쇄", Icons.PRINT, false, this::printCurrentFile));
+            list.add(new GlassMenu.Entry("공유", Icons.SHARE, false, this::shareCurrentFile));
+            boolean bm = bookmarks.contains(currentPath);
+            list.add(new GlassMenu.Entry(bm ? "책갈피 제거" : "책갈피 추가", bm ? Icons.BOOKMARK_FILL : Icons.BOOKMARK, bm, () -> toggleBookmark(currentPath)));
+            if (folderItems.size() > 1) list.add(new GlassMenu.Entry("슬라이드쇼", Icons.SLIDESHOW, false, this::startSlideshow));
+            list.add(new GlassMenu.Entry("이름 바꾸기", Icons.EDIT, false, this::showRenameDialog));
+            list.add(new GlassMenu.Entry("삭제", Icons.TRASH, false, this::showDeleteConfirmDialog));
+            list.add(new GlassMenu.Entry("파일 닫기", Icons.CLOSE, false, this::closeCurrentFile));
+        }
+        return GlassMenu.show(this, anchor, list);
+    }
+
+    private void showSortGlassMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("이름순", Icons.SORT, "name".equals(sortOrder), () -> { sortOrder = "name"; sortFolderItems(); if (filesPage != null) filesPage.refresh(); }).checkable(),
+                new GlassMenu.Entry("최신 수정순", Icons.CLOCK, "date".equals(sortOrder), () -> { sortOrder = "date"; sortFolderItems(); if (filesPage != null) filesPage.refresh(); }).checkable(),
+                new GlassMenu.Entry("파일 크기순", Icons.FILES, "size".equals(sortOrder), () -> { sortOrder = "size"; sortFolderItems(); if (filesPage != null) filesPage.refresh(); }).checkable()
+        );
+        GlassMenu.show(this, anchor, list);
+    }
+
+    private void applyMarkupKind(String kind) {
+        stageCanvasView.setMarkupOptions(kind, stageCanvasView.getMarkupColor(),
+                stageCanvasView.getMarkupWidth(), stageCanvasView.getMarkupFontSize(), stageCanvasView.isMarkupFill());
+    }
+
+    private void applyMarkupColor(int color) {
+        stageCanvasView.setMarkupOptions(stageCanvasView.getMarkupKind(), color,
+                stageCanvasView.getMarkupWidth(), stageCanvasView.getMarkupFontSize(), stageCanvasView.isMarkupFill());
+    }
+
+    private void showMarkupMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("펜 그리기", Icons.PEN, false, () -> { applyMarkupKind("pen"); setTool("markup"); }),
+                new GlassMenu.Entry("형광펜", Icons.HIGHLIGHT, false, () -> { applyMarkupKind("hl"); setTool("markup"); }),
+                new GlassMenu.Entry("화살표 · 도형", Icons.SHAPES, false, () -> { applyMarkupKind("arrow"); setTool("markup"); }),
+                new GlassMenu.Entry("텍스트 주석", Icons.TEXT_ADD, false, () -> { applyMarkupKind("text"); setTool("markup"); }),
+                new GlassMenu.Entry("서명 추가", Icons.SIGN, false, () -> { applyMarkupKind("sign"); setTool("markup"); }),
+                new GlassMenu.Entry("가리기 (리댁트)", Icons.CROP, false, () -> { applyMarkupKind("redact"); setTool("markup"); })
+        );
+        GlassMenu.show(this, anchor, list);
+    }
+
+    private void showImageEditMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("자르기", Icons.CROP, "crop".equals(stageCanvasView.getActiveTool()), () -> setTool("crop")),
+                new GlassMenu.Entry("색상 보정", Icons.ADJUST, "adjust".equals(stageCanvasView.getActiveTool()), () -> setTool("adjust")),
+                new GlassMenu.Entry("배경 투명 제거 (알파)", Icons.ALPHA, "alpha".equals(stageCanvasView.getActiveTool()), () -> setTool("alpha")),
+                new GlassMenu.Entry("오른쪽 90° 회전", Icons.ROTATE_R, false, () -> rotateCurrentImage(90)),
+                new GlassMenu.Entry("왼쪽 90° 회전", Icons.ROTATE_L, false, () -> rotateCurrentImage(-90)),
+                new GlassMenu.Entry("좌우 반전", Icons.FLIP_H, false, () -> flipCurrentImage(true, false)),
+                new GlassMenu.Entry("상하 반전", Icons.FLIP_V, false, () -> flipCurrentImage(false, true)),
+                new GlassMenu.Entry("크기 조절", Icons.RESIZE, false, this::showResizeImageDialog),
+                new GlassMenu.Entry("영역 선택", Icons.SHAPES, "select".equals(stageCanvasView.getActiveTool()), () -> setTool("select")),
+                new GlassMenu.Entry("실행 취소", Icons.UNDO, false, this::undoImageEdit),
+                new GlassMenu.Entry("다시 실행", Icons.REDO, false, this::redoImageEdit)
+        );
+        GlassMenu.show(this, anchor, list);
+    }
+
+    private void showPdfMenu(RectF anchor) {
+        String vm = stageCanvasView.getPdfViewMode();
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("페이지 이동", Icons.PAGES, false, this::showPdfJumpPageDialog),
+                new GlassMenu.Entry("페이지 정리 · 삭제", Icons.SORT, false, this::showPdfPageOrganizeDialog),
+                new GlassMenu.Entry("현재 페이지 90° 회전", Icons.ROTATE_R, false, () -> rotateCurrentPdfPage(90)),
+                new GlassMenu.Entry("빈 페이지 추가", Icons.OPEN_FILE, false, this::insertBlankPdfPage),
+                new GlassMenu.Entry("파일에서 페이지 삽입", Icons.FOLDER, false, this::launchInsertPagePicker),
+                new GlassMenu.Entry("연속 스크롤 보기", Icons.PDF, "cont".equals(vm), () -> { stageCanvasView.setPdfViewMode("cont"); syncChromeState(); }),
+                new GlassMenu.Entry("한 페이지 보기", Icons.PDF, "single".equals(vm), () -> { stageCanvasView.setPdfViewMode("single"); syncChromeState(); }),
+                new GlassMenu.Entry("두 페이지 보기", Icons.PDF, "two".equals(vm), () -> { stageCanvasView.setPdfViewMode("two"); syncChromeState(); }),
+                new GlassMenu.Entry("실행 취소", Icons.UNDO, false, () -> undoPdf(false)),
+                new GlassMenu.Entry("다시 실행", Icons.REDO, false, () -> undoPdf(true))
+        );
+        GlassMenu.show(this, anchor, list);
+    }
+
+    private void showOcrMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = new ArrayList<>();
+        list.add(new GlassMenu.Entry("텍스트 인식 및 검색", Icons.SEARCH, false, this::onSearch));
+        list.add(new GlassMenu.Entry("전체 텍스트 추출 보기", Icons.OCR, false, this::showFullExtractedTextDialog));
+        if (!currentOcrBoxes.isEmpty()) {
+            list.add(new GlassMenu.Entry("이전 검색 결과", Icons.PREV, false, () -> stepSearchOrOcr(-1)));
+            list.add(new GlassMenu.Entry("다음 검색 결과", Icons.NEXT, false, () -> stepSearchOrOcr(1)));
+            list.add(new GlassMenu.Entry("강조 표시 지우기", Icons.CLOSE, false, () -> {
+                currentOcrBoxes.clear(); activeOcrHit = -1; stageCanvasView.setOcrBoxes(null, -1); syncChromeState();
+            }));
+        }
+        GlassMenu.show(this, anchor, list);
+    }
+
+    private void showZoomMenu(RectF anchor) {
+        if ("doc".equals(currentKind)) {
+            List<GlassMenu.Entry> list = Arrays.asList(
+                    new GlassMenu.Entry("확대 (+15%)", Icons.ZOOM_IN, false, () -> { nativeDocView.setZoomScale(nativeDocView.getZoomScale() + 0.15f); syncChromeState(); }),
+                    new GlassMenu.Entry("축소 (-15%)", Icons.ZOOM_OUT, false, () -> { nativeDocView.setZoomScale(nativeDocView.getZoomScale() - 0.15f); syncChromeState(); }),
+                    new GlassMenu.Entry("기본 배율 (100%)", Icons.FIT, false, () -> { nativeDocView.setZoomScale(1f); syncChromeState(); })
+            );
+            GlassMenu.show(this, anchor, list);
+            return;
+        }
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("화면에 맞춤", Icons.FIT, false, () -> { stageCanvasView.fitToWindow(); syncChromeState(); }),
+                new GlassMenu.Entry("원본 크기 (100%)", Icons.RESIZE, false, () -> { stageCanvasView.setZoom(1f); syncChromeState(); }),
+                new GlassMenu.Entry("확대 (+25%)", Icons.ZOOM_IN, false, () -> { stageCanvasView.setZoom(stageCanvasView.getZoom() * 1.25f); syncChromeState(); }),
+                new GlassMenu.Entry("축소 (-25%)", Icons.ZOOM_OUT, false, () -> { stageCanvasView.setZoom(stageCanvasView.getZoom() / 1.25f); syncChromeState(); })
+        );
+        GlassMenu.show(this, anchor, list);
+    }
+
+    private void showSaveExportMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("원본 위치에 저장", Icons.SAVE, isModified, () -> saveCurrentFile(false)),
+                new GlassMenu.Entry("다른 이름으로 저장", Icons.FOLDER, false, () -> saveCurrentFile(true)),
+                new GlassMenu.Entry("형식 변환 · 내보내기", Icons.EXPORT, false, () -> showExportGlassMenu(anchor)),
+                new GlassMenu.Entry("인쇄", Icons.PRINT, false, this::printCurrentFile),
+                new GlassMenu.Entry("공유", Icons.SHARE, false, this::shareCurrentFile)
+        );
+        GlassMenu.show(this, anchor, list);
+    }
+
+    private void showExportGlassMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("PNG 이미지 (.png)", Icons.VIEW, false, () -> exportCurrentToFormat(".png")),
+                new GlassMenu.Entry("JPEG 고화질 (.jpg)", Icons.VIEW, false, () -> exportCurrentToFormat(".jpg")),
+                new GlassMenu.Entry("WebP 이미지 (.webp)", Icons.VIEW, false, () -> exportCurrentToFormat(".webp")),
+                new GlassMenu.Entry("PDF 문서 (.pdf)", Icons.PDF, false, () -> exportCurrentToFormat(".pdf")),
+                new GlassMenu.Entry("TIFF 무손실 (.tiff)", Icons.VIEW, false, () -> exportCurrentToFormat(".tiff")),
+                new GlassMenu.Entry("BMP / GIF / ICO", Icons.EXPORT, false, this::showMoreExportFormatsDialog)
+        );
+        GlassMenu.sheet(this, anchor, "형식 변환 · 내보내기", list);
+    }
+
+    // ---- Settings Pickers (Drop-Morph GlassMenu Sheets!) ----
+    private RectF anchorForView(View v) {
+        float[] o = Glass.abs(v);
+        return new RectF(o[0], o[1], o[0] + v.getWidth(), o[1] + v.getHeight());
+    }
+
+    void pickTheme(View v) {
+        String cur = prefs.getString("theme", prefs.getBoolean("system_theme", true) ? "system" : (prefs.getBoolean("dark_theme", true) ? "dark" : "light"));
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("시스템 설정 따르기", 0, "system".equals(cur), () -> applyThemePref("system")).checkable(),
+                new GlassMenu.Entry("라이트 모드", 0, "light".equals(cur), () -> applyThemePref("light")).checkable(),
+                new GlassMenu.Entry("다크 모드", 0, "dark".equals(cur), () -> applyThemePref("dark")).checkable()
+        );
+        GlassMenu.sheet(this, anchorForView(v), "테마 선택", list);
+    }
+
+    private void applyThemePref(String mode) {
+        prefs.edit()
+                .putString("theme", mode)
+                .putBoolean("system_theme", "system".equals(mode))
+                .putBoolean("dark_theme", "dark".equals(mode))
+                .apply();
+        recreateChromeForTheme();
+    }
+
+    void pickStyle(View v) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("A 스타일 (프리즘 리퀴드 글래스)", Icons.VIEW, !Ui.gStyle, () -> {
+                    prefs.edit().putString("app_style", "prism").apply();
+                    recreateChromeForTheme();
+                }).checkable(),
+                new GlassMenu.Entry("G 스타일 (One UI 9.5 프로스트)", Icons.SHAPES, Ui.gStyle, () -> {
+                    prefs.edit().putString("app_style", "oneui").apply();
+                    recreateChromeForTheme();
+                }).checkable()
+        );
+        GlassMenu.sheet(this, anchorForView(v), "앱 디자인 스타일", list);
+    }
+
+    void pickAccent(View v) {
+        String cur = Ui.accentKey(prefs);
+        List<GlassMenu.Entry> list = new ArrayList<>();
+        for (int i = 0; i < Ui.ACCENT_KEYS.length; i++) {
+            final String key = Ui.ACCENT_KEYS[i];
+            list.add(new GlassMenu.Entry(Ui.ACCENT_NAMES[i], 0, key.equals(cur), () -> {
+                prefs.edit().putString("accent_color", key).apply();
+                recreateChromeForTheme();
+            }).checkable());
+        }
+        GlassMenu.sheet(this, anchorForView(v), "강조 색상", list);
+    }
+
+    void pickExportQuality(View v) {
+        int[] vals = {70, 80, 90, 95, 100};
+        List<GlassMenu.Entry> list = new ArrayList<>();
+        for (int q : vals) {
+            list.add(new GlassMenu.Entry(q + "%", 0, exportQuality == q, () -> {
+                exportQuality = q;
+                prefs.edit().putInt("export_quality", q).apply();
+                if (settingsPage != null) settingsPage.rebuild();
+            }).checkable());
+        }
+        GlassMenu.sheet(this, anchorForView(v), "JPEG 저장 품질", list);
+    }
+
+    void pickExportDpi(View v) {
+        int[] vals = {96, 150, 200, 300};
+        List<GlassMenu.Entry> list = new ArrayList<>();
+        for (int d : vals) {
+            list.add(new GlassMenu.Entry(d + " dpi", 0, exportDpi == d, () -> {
+                exportDpi = d;
+                prefs.edit().putInt("export_dpi", d).apply();
+                if (settingsPage != null) settingsPage.rebuild();
+            }).checkable());
+        }
+        GlassMenu.sheet(this, anchorForView(v), "PDF 내보내기 해상도", list);
+    }
+
+    void pickSlideInterval(View v) {
+        int[] vals = {1, 3, 5, 10, 30};
+        List<GlassMenu.Entry> list = new ArrayList<>();
+        for (int s : vals) {
+            list.add(new GlassMenu.Entry(s + "초", 0, slideshowIntervalSec == s, () -> {
+                slideshowIntervalSec = s;
+                prefs.edit().putInt("slide_sec", s).apply();
+                if (settingsPage != null) settingsPage.rebuild();
+            }).checkable());
+        }
+        GlassMenu.sheet(this, anchorForView(v), "슬라이드쇼 간격", list);
+    }
+
+    void refreshVisualTheme() {
+        if (header != null) header.invalidate();
+        if (dock != null) dock.invalidate();
+    }
+
+    void recreateChromeForTheme() {
+        buildCompleteNativeUI();
+    }
+
+    // ---- Stage & Document Listener Binding ----
     private void bindCoreViewListeners() {
         stageCanvasView.setStageListener(new StageCanvasView.StageListener() {
-            @Override
-            public void onZoomChanged(float zoom) {
-                updateStatusBar();
-                refreshToolbars();
+            @Override public void onZoomChanged(float zoom) { syncChromeState(); }
+            @Override public void onCursorInfo(String info) {}
+            @Override public void onNavigateFile(int delta) { navigateFile(delta); }
+            @Override public void onPdfPageChanged(int pageIndex, int totalPages) {
+                syncChromeState();
+                if (filesPage != null && tab == 2) filesPage.refresh();
             }
-
-            @Override
-            public void onCursorInfo(String info) {
-                if (statusRightText != null) statusRightText.setText(info);
-            }
-
-            @Override
-            public void onNavigateFile(int delta) {
-                navigateFile(delta);
-            }
-
-            @Override
-            public void onPdfPageChanged(int pageIndex, int totalPages) {
-                updateHeaderTitles();
-                updateStatusBar();
-                refreshToolbars();
-                if (sidebarVisible) refreshSidebarContent();
-            }
-
-            @Override
-            public void onAnnotationCreated(MarkupModel.Annotation ann, int pageIndex) {
+            @Override public void onAnnotationCreated(MarkupModel.Annotation ann, int pageIndex) {
                 if ("image".equals(currentKind)) {
                     pushImageUndo();
                     stageCanvasView.getImageAnnotations().add(ann);
                 } else if ("pdf".equals(currentKind)) {
                     List<MarkupModel.PdfPageItem> pages = stageCanvasView.getPdfPages();
-                    if (pageIndex >= 0 && pageIndex < pages.size()) {
-                        pages.get(pageIndex).anns.add(ann);
-                    }
+                    if (pageIndex >= 0 && pageIndex < pages.size()) pages.get(pageIndex).anns.add(ann);
                 }
                 markModified();
-                updateHeaderTitles();
-                if (sidebarVisible && "anns".equals(sidebarTab)) refreshSidebarContent();
+                syncChromeState();
             }
-
-            @Override
-            public void onAnnotationSelected(MarkupModel.Annotation ann, int pageIndex) {
-                refreshSubbar();
-            }
-
-            @Override
-            public void onAnnotationModified() {
-                markModified();
-                updateHeaderTitles();
-                if (sidebarVisible && "anns".equals(sidebarTab)) refreshSidebarContent();
-            }
-
-            @Override
-            public void onTextToolTap(final float docX, final float docY, final int pageIndex) {
-                showAddTextAnnotationDialog(docX, docY, pageIndex);
-            }
-
-            @Override
-            public void onSignToolTap(final float docX, final float docY, final int pageIndex) {
-                showSignatureDialog(docX, docY, pageIndex);
-            }
-
-            @Override
-            public void onAlphaTap(int imgX, int imgY) {
-                performInstantAlphaAt(imgX, imgY);
-            }
-
-            @Override
-            public void onSelectionChanged(RectF selRect) {
-                refreshSubbar();
-            }
-
-            @Override
-            public void onLongPressContext(float screenX, float screenY) {
-                showStageQuickMenu();
+            @Override public void onAnnotationSelected(MarkupModel.Annotation ann, int pageIndex) { refreshSubToolBar(); }
+            @Override public void onAnnotationModified() { markModified(); syncChromeState(); }
+            @Override public void onTextToolTap(float docX, float docY, int pageIndex) { showAddTextAnnotationDialog(docX, docY, pageIndex); }
+            @Override public void onSignToolTap(float docX, float docY, int pageIndex) { showSignatureDialog(docX, docY, pageIndex); }
+            @Override public void onAlphaTap(int imgX, int imgY) { performInstantAlphaAt(imgX, imgY); }
+            @Override public void onSelectionChanged(RectF selRect) { refreshSubToolBar(); }
+            @Override public void onLongPressContext(float screenX, float screenY) {
+                RectF a = new RectF(screenX - Ui.dp(24), screenY - Ui.dp(24), screenX + Ui.dp(24), screenY + Ui.dp(24));
+                showOverflowGlassMenu(a);
             }
         });
 
         nativeDocView.setDocListener(new NativeDocView.DocListener() {
-            @Override
-            public void onDocDirtyChanged(boolean dirty) {
-                isModified = dirty;
-                updateHeaderTitles();
-                refreshToolbars();
-            }
-
-            @Override
-            public void onSheetSelected(int sheetIdx, String sheetTitle) {
-                updateStatusBar();
-            }
-
-            @Override
-            public void onSearchHitsChanged(int currentIdx, int totalHits) {
-                if (searchCountLabel != null) {
-                    searchCountLabel.setText(totalHits > 0 ? ((currentIdx + 1) + " / " + totalHits) : "0 / 0");
-                }
+            @Override public void onDocDirtyChanged(boolean dirty) { isModified = dirty; syncChromeState(); }
+            @Override public void onSheetSelected(int sheetIdx, String sheetTitle) { syncChromeState(); }
+            @Override public void onSearchHitsChanged(int currentIdx, int totalHits) {
+                docHitIndex = currentIdx;
+                docHitTotal = totalHits;
             }
         });
-    }
-
-    // ---------- Build 100% Pure Native Android UI ----------
-    private void rebuildChromePreserveStage() {
-        if (stageHostFrame != null) {
-            stageHostFrame.removeAllViews();
-        }
-        buildCompleteNativeUI();
-        attachActiveStageView();
-        updateHeaderTitles();
-        refreshSidebarContent();
-        refreshInfoPanelContent();
-        refreshToolbars();
-        updateStatusBar();
-    }
-
-    /** Prism glass for a floating surface (Android 13+, where the AGSL shader runs); the old flat surface otherwise. */
-    private android.graphics.drawable.Drawable glassOr(android.graphics.drawable.Drawable flat, boolean panel, int radius) {
-        if (!Glass.shadersOk || !(stageHostFrame instanceof Glass.Backdrop)) return flat;
-        Glass.Backdrop b = (Glass.Backdrop) stageHostFrame;
-        int base = isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8;
-        return panel ? GlassDrawable.panel(b, base, radius) : GlassDrawable.bar(b, base, radius);
-    }
-
-    private boolean glassHooked;
-    /** Heat rule: glass re-samples the stage only on frames where the stage actually changed. */
-    private void hookGlassRefresh() {
-        if (glassHooked) return;
-        glassHooked = true;
-        getWindow().getDecorView().getViewTreeObserver().addOnPreDrawListener(() -> {
-            if (stageHostFrame != null && stageHostFrame.isDirty()) {
-                if (topHeaderBar != null) topHeaderBar.invalidate();
-                if (mainPillBar != null) mainPillBar.invalidate();
-                if (subbarContainer != null) subbarContainer.invalidate();
-                if (searchBarOverlay != null) searchBarOverlay.invalidate();
-            }
-            return true;
-        });
-    }
-
-    private void buildCompleteNativeUI() {
-        if (currentPath.isEmpty()) { buildWelcomeWorkspace(); return; }
-        applySystemBarColors();
-        stageCanvasView.setDarkTheme(isDarkTheme);
-        nativeDocView.setDarkTheme(isDarkTheme);
-
-        int bgMain = isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8;
-        int bgSurface = isDarkTheme ? 0xFF171A22 : 0xFFFFFFFF;
-        int borderCol = isDarkTheme ? 0xFF282D3A : 0xFFDCE1EC;
-        int textPrimary = isDarkTheme ? 0xFFF1F3F9 : 0xFF15181E;
-        int textSecondary = isDarkTheme ? 0xFF9AA3B5 : 0xFF5D6575;
-
-        Ui.init(this, isDarkTheme);
-        rootFrame = new FrameLayout(this);
-        rootFrame.setBackgroundColor(bgMain);
-
-        LinearLayout masterVertical = new LinearLayout(this);
-        masterVertical.setOrientation(LinearLayout.VERTICAL);
-        rootFrame.addView(masterVertical, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        // Create stage backdrop FIRST so floating header & bottom toolbars refract live content
-        stageHostFrame = new Glass.Backdrop(this);
-        stageHostFrame.setBackgroundColor(isDarkTheme ? 0xFF0B0D12 : 0xFFE9EDF4);
-        emptyWelcomeView = null;
-
-        // 1. Top Header Bar (Tablet: docked top bar; Mobile: floating Liquid Glass pill over stage)
-        topHeaderBar = buildTopHeaderBar(bgSurface, borderCol, textPrimary, textSecondary);
-        if (isTabletLayout) {
-            masterVertical.addView(topHeaderBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
-        }
-
-        // 2. Middle Workspace Area
-        workspaceFrame = new FrameLayout(this);
-        masterVertical.addView(workspaceFrame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        // Sidebar & Info Panel
-        sidebarContainer = buildSidebarView(bgSurface, borderCol, textPrimary, textSecondary);
-        infoPanelContainer = buildInfoPanelView(bgSurface, borderCol, textPrimary, textSecondary);
-
-        // Floating Pill Toolbar + Subbar Host
-        floatingToolbarHost = new LinearLayout(this);
-        floatingToolbarHost.setOrientation(LinearLayout.VERTICAL);
-        floatingToolbarHost.setGravity(Gravity.CENTER_HORIZONTAL);
-        floatingToolbarHost.setClipChildren(false);
-        floatingToolbarHost.setClipToPadding(false);
-        subbarContainer = new LinearLayout(this);
-        subbarContainer.setOrientation(LinearLayout.HORIZONTAL);
-        subbarContainer.setGravity(Gravity.CENTER_VERTICAL);
-        mainPillBar = new LinearLayout(this) {
-            @Override protected void onMeasure(int widthSpec,int heightSpec) {
-                int width=MeasureSpec.getMode(widthSpec)==MeasureSpec.UNSPECIFIED?dp(520):Math.min(dp(520),MeasureSpec.getSize(widthSpec));
-                super.onMeasure(MeasureSpec.makeMeasureSpec(width,MeasureSpec.EXACTLY),heightSpec);
-            }
-        };
-        mainPillBar.setOrientation(LinearLayout.HORIZONTAL);
-        mainPillBar.setGravity(Gravity.CENTER_VERTICAL);
-
-        if (isTabletLayout) {
-            // Tablet UI: Top Floating Toolbar, then Subbar; 3-Column Split Layout
-            floatingToolbarHost.addView(mainPillBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            LinearLayout.LayoutParams sblp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            sblp.topMargin = dp(6);
-            floatingToolbarHost.addView(subbarContainer, sblp);
-
-            LinearLayout splitRow = new LinearLayout(this);
-            splitRow.setOrientation(LinearLayout.HORIZONTAL);
-            workspaceFrame.addView(splitRow, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-            int sideWidth = bookLayout ? Math.max(dp(200), foldBounds.left) : dp(240);
-            splitRow.addView(sidebarContainer, new LinearLayout.LayoutParams(sideWidth, ViewGroup.LayoutParams.MATCH_PARENT));
-            if (bookLayout) { View gutter = new View(this); splitRow.addView(gutter, new LinearLayout.LayoutParams(Math.max(dp(12), foldBounds.width()), ViewGroup.LayoutParams.MATCH_PARENT)); sidebarVisible = true; }
-
-            FrameLayout centerColumn = new FrameLayout(this);
-            centerColumn.addView(stageHostFrame, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            FrameLayout.LayoutParams ftLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            ftLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            ftLp.topMargin = dp(10);
-            ftLp.leftMargin = dp(12);
-            ftLp.rightMargin = dp(12);
-            centerColumn.addView(floatingToolbarHost, ftLp);
-
-            splitRow.addView(centerColumn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
-            if (bookLayout) {
-                FrameLayout.LayoutParams infoParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-                centerColumn.addView(infoPanelContainer, infoParams);
-                topHeaderBar.setPadding(foldBounds.right + dp(8), 0, dp(8), 0);
-            } else splitRow.addView(infoPanelContainer, new LinearLayout.LayoutParams(dp(300), ViewGroup.LayoutParams.MATCH_PARENT));
-
-            // Tablet Status Bar at bottom
-            statusBarContainer = buildTabletStatusBar(bgSurface, borderCol, textSecondary);
-            masterVertical.addView(statusBarContainer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
-        } else {
-            // Mobile UI: Fullscreen Stage + Bottom Docked Subbar & Pill Toolbar + Slide-over Drawer + Bottom Sheet Info
-            floatingToolbarHost.addView(subbarContainer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            LinearLayout.LayoutParams mplp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            mplp.topMargin = dp(6);
-            floatingToolbarHost.addView(mainPillBar, mplp);
-
-            workspaceFrame.addView(stageHostFrame, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-            // Floating Prism Liquid Glass Top Pill on Mobile
-            FrameLayout.LayoutParams thLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
-            thLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            thLp.topMargin = dp(8);
-            thLp.leftMargin = dp(10);
-            thLp.rightMargin = dp(10);
-            workspaceFrame.addView(topHeaderBar, thLp);
-
-            FrameLayout.LayoutParams ftLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            ftLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-            ftLp.leftMargin = dp(10);
-            ftLp.rightMargin = dp(10);
-            ftLp.bottomMargin = dp(10);
-            workspaceFrame.addView(floatingToolbarHost, ftLp);
-
-            // Scrim for Mobile Drawer & Bottom Sheet
-            mobileScrimView = new View(this);
-            mobileScrimView.setBackgroundColor(0x88000000);
-            mobileScrimView.setVisibility(View.GONE);
-            mobileScrimView.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    sidebarVisible = false;
-                    infoVisible = false;
-                    updateDrawerAndPanelVisibility();
-                }
-            });
-            workspaceFrame.addView(mobileScrimView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-            FrameLayout.LayoutParams sideLp = new FrameLayout.LayoutParams(dp(AdaptiveLayout.drawerWidth(windowWidthDp)), ViewGroup.LayoutParams.MATCH_PARENT);
-            sideLp.gravity = Gravity.LEFT;
-            workspaceFrame.addView(sidebarContainer, sideLp);
-
-            FrameLayout.LayoutParams infoLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.min(dp(430), Math.max(dp(180), getResources().getDisplayMetrics().heightPixels - dp(120))));
-            infoLp.gravity = Gravity.BOTTOM;
-            workspaceFrame.addView(infoPanelContainer, infoLp);
-        }
-
-        // Search / OCR Floating Bar Overlay
-        searchBarOverlay = buildSearchBarOverlay(bgSurface, borderCol, textPrimary, textSecondary);
-        FrameLayout.LayoutParams sblp = new FrameLayout.LayoutParams(
-                isTabletLayout ? dp(420) : ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        sblp.gravity = Gravity.TOP | (isTabletLayout ? Gravity.RIGHT : Gravity.CENTER_HORIZONTAL);
-        sblp.topMargin = dp(isTabletLayout ? 64 : 8);
-        sblp.leftMargin = dp(12);
-        sblp.rightMargin = dp(12);
-        workspaceFrame.addView(searchBarOverlay, sblp);
-
-        // Fullscreen Slideshow Overlay
-        slideshowOverlay = buildSlideshowOverlay();
-        rootFrame.addView(slideshowOverlay, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        installRootLayout();
-        applySystemBarColors();
-        floatingToolbarHost.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
-            FrameLayout.LayoutParams stageParams = (FrameLayout.LayoutParams) stageHostFrame.getLayoutParams();
-            if (isTabletLayout) {
-                int reserve=floatingToolbarHost.getVisibility()==View.VISIBLE?b-t+dp(22):0;
-                if(stageParams.topMargin!=reserve){stageParams.topMargin=reserve;stageHostFrame.setLayoutParams(stageParams);}return;
-            }
-            boolean tabletop = foldBounds != null && foldBounds.width() > foldBounds.height();
-            int oldHeight = stageParams.height, oldMargin = stageParams.bottomMargin;
-            if (tabletop) {
-                int[] at = new int[2]; workspaceFrame.getLocationInWindow(at);
-                stageParams.height = Math.max(dp(120), foldBounds.top - at[1] - dp(8));
-                stageParams.bottomMargin = 0;
-            } else { stageParams.height = ViewGroup.LayoutParams.MATCH_PARENT; stageParams.bottomMargin = 0; }
-            if (oldHeight != stageParams.height || oldMargin != stageParams.bottomMargin) stageHostFrame.setLayoutParams(stageParams);
-        });
-        attachActiveStageView();
-        updateDrawerAndPanelVisibility();
-        refreshToolbars();
-        hookGlassRefresh();
-    }
-
-    private List<File> collectRecentFiles() {
-        List<File> out = new ArrayList<>();
-        File[] dirs = new File[]{inboxDir, sampleDir};
-        for (File d : dirs) {
-            if (d == null || !d.isDirectory()) continue;
-            File[] fs = d.listFiles();
-            if (fs == null) continue;
-            for (File f : fs) if (f.isFile() && f.length() > 0) out.add(f);
-        }
-        Collections.sort(out, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
-        return out;
-    }
-
-    private void createBlankSketch() {
-        try {
-            if (inboxDir != null) inboxDir.mkdirs();
-            File f = new File(inboxDir != null ? inboxDir : getCacheDir(), "sketch_" + System.currentTimeMillis() + ".png");
-            Bitmap bmp = Bitmap.createBitmap(1440, 1920, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(bmp);
-            c.drawColor(Color.WHITE);
-            try (FileOutputStream fos = new FileOutputStream(f)) {
-                bmp.compress(Bitmap.CompressFormat.PNG, 100, fos);
-            }
-            bmp.recycle();
-            openFileUnchecked(f.getAbsolutePath());
-            mainHandler.post(() -> setTool("markup"));
-        } catch (Exception e) {
-            toast("빈 스케치 생성 실패: " + e.getMessage());
-        }
-    }
-
-    private void buildWelcomeWorkspace() {
-        sidebarVisible = infoVisible = false;
-        sidebarContainer = sidebarListContainer = sidebarPdfActionRow = infoPanelContainer = infoContentBody = null;
-        floatingToolbarHost = mainPillBar = subbarContainer = searchBarOverlay = statusBarContainer = null;
-        statusLeftText = statusCenterText = statusRightText = null; mobileScrimView = null; slideshowOverlay = null;
-        int ink = isDarkTheme ? 0xFFF4F6FA : 0xFF111318;
-        int bgCol = isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8;
-        Ui.init(this, isDarkTheme);
-        rootFrame = new FrameLayout(this); rootFrame.setTag("welcome-root");
-        rootFrame.setBackgroundColor(bgCol);
-        rootFrame.setClipChildren(false);
-
-        // Fullscreen Backdrop so top-right pill & bottom Prism dock refract live scroll content
-        stageHostFrame = new Glass.Backdrop(this);
-        stageHostFrame.setTag("welcome-workspace");
-        stageHostFrame.setBackgroundColor(bgCol);
-        workspaceFrame = new FrameLayout(this);
-        workspaceFrame.setClipChildren(false);
-        workspaceFrame.addView(stageHostFrame, new FrameLayout.LayoutParams(-1, -1));
-        rootFrame.addView(workspaceFrame, new FrameLayout.LayoutParams(-1, -1));
-
-        emptyWelcomeView = new WelcomeView(this, isDarkTheme, (Glass.Backdrop) stageHostFrame, new WelcomeView.Actions() {
-            public void open() { launchSystemFilePicker(); }
-            public void paste() { pasteClipboardImage(); }
-            public void capture() { launchScreenCapture(); }
-            public void newSketch() { createBlankSketch(); }
-            public void openFile(File file) { if (file != null && file.exists()) openFileUnchecked(file.getAbsolutePath()); }
-            public void openSettings() { showSettingsDialog(); }
-            public void checkUpdate() { Updater.checkInteractive(MainActivity.this); }
-            public void toggleTheme() {
-                isDarkTheme = !isDarkTheme;
-                prefs.edit().putBoolean("system_theme", false).putBoolean("dark_theme", isDarkTheme).apply();
-                buildWelcomeWorkspace();
-            }
-        }, collectRecentFiles(), bookmarks);
-        stageHostFrame.addView(emptyWelcomeView, new FrameLayout.LayoutParams(-1, -1));
-        stageHostFrame.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> fitWelcomeAroundFold());
-
-        // Floating top-right Prism glass action pill (no duplicate title bar, zero double border)
-        topHeaderBar = new LinearLayout(this);
-        topHeaderBar.setOrientation(LinearLayout.HORIZONTAL);
-        topHeaderBar.setGravity(Gravity.CENTER_VERTICAL);
-        topHeaderBar.setTag("welcome-toolbar");
-        topHeaderBar.setPadding(dp(4), dp(2), dp(4), dp(2));
-        GlassDrawable pillGlass = GlassDrawable.bar((Glass.Backdrop) stageHostFrame, bgCol, dp(24));
-        GlassDrawable.attachGlass(topHeaderBar, Glass.shadersOk ? pillGlass
-                : WelcomeView.surface(isDarkTheme ? 0xE61C2029 : 0xEBFFFFFF, dp(24), isDarkTheme ? 0x26FFFFFF : 0x18000000));
-        topHeaderBar.addView(createIconBtn("markup", "빈 스케치", ink, v -> createBlankSketch()));
-        topHeaderBar.addView(createIconBtn("menu", "메뉴", ink, v -> showTopOverflowMenu(v)));
-        FrameLayout.LayoutParams thLp = new FrameLayout.LayoutParams(-2, dp(46), Gravity.TOP | Gravity.END);
-        thLp.topMargin = dp(10);
-        thLp.rightMargin = dp(14);
-        workspaceFrame.addView(topHeaderBar, thLp);
-
-        headerTitleView = new TextView(this); headerTitleView.setText("뷰어");
-        headerSubView = new TextView(this); headerSubView.setVisibility(View.GONE);
-        installRootLayout();
-        applySystemBarColors();
-    }
-    private void fitWelcomeAroundFold() {
-        if (emptyWelcomeView == null || !currentPath.isEmpty()) return;
-        int left=0,top=0,right=0,bottom=0;
-        if (foldBounds != null) {
-            int[] origin = new int[2]; stageHostFrame.getLocationInWindow(origin);
-            Rect crease = new Rect(foldBounds); crease.offset(-origin[0],-origin[1]);
-            if (crease.height() > crease.width() && crease.left > 0 && crease.right < stageHostFrame.getWidth()) {
-                if (crease.left >= stageHostFrame.getWidth()-crease.right) right=stageHostFrame.getWidth()-crease.left+dp(8); else left=crease.right+dp(8);
-            } else if (crease.width() > crease.height() && crease.top > 0 && crease.bottom < stageHostFrame.getHeight()) {
-                if (crease.top >= stageHostFrame.getHeight()-crease.bottom) bottom=stageHostFrame.getHeight()-crease.top+dp(8); else top=crease.bottom+dp(8);
-            }
-        }
-        emptyWelcomeView.setPadding(left,top,right,bottom);
-    }
-    private void installRootLayout() {
-        setContentView(rootFrame);
-        rootFrame.setOnApplyWindowInsetsListener((view,insets) -> {
-            if (Build.VERSION.SDK_INT >= 30) {
-                android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime()); view.setPadding(safe.left,safe.top,safe.right,safe.bottom);
-            } else view.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());
-            return insets;
-        });
-        rootFrame.requestApplyInsets();
-        configureFileDrop();
-    }
-    private void configureFileDrop() {
-        LinearLayout cue = new LinearLayout(this); cue.setOrientation(LinearLayout.VERTICAL); cue.setGravity(Gravity.CENTER); cue.setPadding(dp(24),dp(24),dp(24),dp(24));
-        cue.setBackground(WelcomeView.surface(isDarkTheme ? 0xF0203C31 : 0xF0E6F5EE,dp(26),WelcomeView.ACCENT)); cue.setTag("file-drop-overlay"); cue.setVisibility(View.GONE);
-        TextView title = new TextView(this); title.setText("여기에 놓아 열기"); title.setTextColor(isDarkTheme?0xFFACE5CD:0xFF287A60); title.setTextSize(21); title.setGravity(Gravity.CENTER); title.setTypeface(Typeface.DEFAULT_BOLD); cue.addView(title);
-        TextView sub = new TextView(this); sub.setText("이미지 · PDF · 문서 · 미디어"); sub.setTextSize(14); sub.setTextColor(isDarkTheme?0xFFB8D6C8:0xFF557A69); sub.setPadding(0,dp(10),0,0); sub.setGravity(Gravity.CENTER); cue.addView(sub);
-        dropOverlay = cue; FrameLayout.LayoutParams overlay = new FrameLayout.LayoutParams(-1,-1); overlay.setMargins(dp(12),0,dp(12),dp(12)); workspaceFrame.addView(cue,overlay);
-        rootFrame.setOnDragListener((view,event) -> {
-            switch(event.getAction()) {
-                case android.view.DragEvent.ACTION_DRAG_STARTED: return FileDrop.accepts(event.getClipDescription());
-                case android.view.DragEvent.ACTION_DRAG_ENTERED: dropOverlay.setVisibility(View.VISIBLE); return true;
-                case android.view.DragEvent.ACTION_DRAG_LOCATION: dropOverlay.setVisibility(View.VISIBLE); return true;
-                case android.view.DragEvent.ACTION_DRAG_EXITED:
-                case android.view.DragEvent.ACTION_DRAG_ENDED: dropOverlay.setVisibility(View.GONE); return true;
-                case android.view.DragEvent.ACTION_DROP:
-                    dropOverlay.setVisibility(View.GONE); List<Uri> uris = FileDrop.collect(event.getClipData()); if(uris.isEmpty()) return false;
-                    final android.view.DragAndDropPermissions permission;
-                    try { permission=requestDragAndDropPermissions(event); } catch(SecurityException e) { toast("이 파일을 읽을 권한이 없습니다."); return false; }
-                    Runnable release=FileDrop.once(() -> { if(permission!=null) try{permission.release();}catch(RuntimeException ignored){} }); dropPermissions.add(release);
-                    openUris(uris,Intent.FLAG_GRANT_READ_URI_PERMISSION,() -> {release.run();mainHandler.post(() -> dropPermissions.remove(release));}); return true;
-                default: return true;
-            }
-        });
-    }
-    private LinearLayout buildTopHeaderBar(int bgSurface, int borderCol, int textPrimary, int textSecondary) {
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(isTabletLayout ? 8 : 12), 0, dp(isTabletLayout ? 8 : 12), 0);
-        if (!isTabletLayout && stageHostFrame instanceof Glass.Backdrop) {
-            GlassDrawable hdrGlass = GlassDrawable.bar((Glass.Backdrop) stageHostFrame, isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8, dp(26));
-            GlassDrawable.attachGlass(bar, hdrGlass);
-        } else {
-            GradientDrawable gd = new GradientDrawable();
-            gd.setColor(bgSurface);
-            gd.setStroke(dp(1), borderCol);
-            bar.setBackground(gd);
-        }
-
-        // Sidebar Toggle Button
-        bar.addView(createIconBtn("sidebar", "사이드바", textPrimary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                sidebarVisible = !sidebarVisible;
-                if (!isTabletLayout && sidebarVisible) infoVisible = false;
-                updateDrawerAndPanelVisibility();
-                if (sidebarVisible) refreshSidebarContent();
-            }
-        }));
-
-        // Quick Open Explorer Button
-        bar.addView(createIconBtn("folder", "파일 탐색기", textPrimary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                launchSystemFilePicker();
-            }
-        }));
-
-        // Title & Subtitle Stack
-        LinearLayout titleStack = new LinearLayout(this);
-        titleStack.setOrientation(LinearLayout.VERTICAL);
-        titleStack.setGravity(Gravity.CENTER_VERTICAL);
-        titleStack.setPadding(dp(8), 0, dp(6), 0);
-
-        headerTitleView = new TextView(this);
-        headerTitleView.setText("뷰어");
-        headerTitleView.setTextColor(textPrimary);
-        headerTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, isTabletLayout ? 15f : 14f);
-        headerTitleView.setTypeface(Typeface.DEFAULT_BOLD);
-        headerTitleView.setSingleLine(true);
-        headerTitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
-
-        headerSubView = new TextView(this);
-        headerSubView.setText("9.5.2");
-        headerSubView.setTextColor(textSecondary);
-        headerSubView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
-        headerSubView.setSingleLine(true);
-
-        titleStack.addView(headerTitleView);
-        titleStack.addView(headerSubView);
-        bar.addView(titleStack, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        // Mobile UI / Tablet UI Mode Switch Chip
-        uiModeChipView = new TextView(this);
-        uiModeChipView.setText(isTabletLayout ? "태블릿 UI" : "모바일 UI");
-        uiModeChipView.setTextColor(0xFF0381FE);
-        uiModeChipView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        uiModeChipView.setTypeface(Typeface.DEFAULT_BOLD);
-        uiModeChipView.setPadding(dp(10), dp(5), dp(10), dp(5));
-        GradientDrawable chipBg = new GradientDrawable();
-        chipBg.setColor(isDarkTheme ? 0x240381FE : 0x160381FE);
-        chipBg.setCornerRadius(dp(14));
-        chipBg.setStroke(dp(1), 0x550381FE);
-        uiModeChipView.setBackground(chipBg);
-        uiModeChipView.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                toggleUiModeManual();
-            }
-        });
-
-        if (isTabletLayout && windowWidthDp >= 1100 && !bookLayout) {
-            bar.addView(createIconBtn("save", "저장", textPrimary, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    saveCurrentFile(false);
-                }
-            }));
-            bar.addView(createIconBtn("export", "내보내기 / 변환", textPrimary, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    showExportDialog();
-                }
-            }));
-            bar.addView(createIconBtn("print", "인쇄", textPrimary, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    printCurrentFile();
-                }
-            }));
-            bar.addView(createIconBtn("share", "공유", textPrimary, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    shareCurrentFile();
-                }
-            }));
-            bar.addView(createIconBtn("play", "슬라이드쇼", textPrimary, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    startSlideshow();
-                }
-            }));
-        }
-
-        // Search / OCR Button
-        bar.addView(createIconBtn("search", "찾기 / OCR", textPrimary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                toggleSearchBar();
-            }
-        }));
-
-        // Info / EXIF / AI Metadata Panel Button
-        bar.addView(createIconBtn("info", "정보 및 AI 메타데이터", textPrimary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                infoVisible = !infoVisible;
-                if (!isTabletLayout && infoVisible) sidebarVisible = false;
-                updateDrawerAndPanelVisibility();
-                if (infoVisible) refreshInfoPanelContent();
-            }
-        }));
-
-        // Overflow Menu Button
-        bar.addView(createIconBtn("more", "더보기 메뉴", textPrimary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showTopOverflowMenu(v);
-            }
-        }));
-
-        return bar;
-    }
-
-    private LinearLayout buildSidebarView(int bgSurface, int borderCol, final int textPrimary, final int textSecondary) {
-        LinearLayout side = new LinearLayout(this);
-        side.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(bgSurface);
-        gd.setStroke(dp(1), borderCol);
-        side.setBackground(gd);
-
-        // Tabs Row
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setPadding(dp(8), dp(8), dp(8), dp(6));
-
-        tabBtnThumbs = createSidebarTabBtn("미리보기", "thumbs", textPrimary, textSecondary);
-        tabBtnAnns = createSidebarTabBtn("주석", "anns", textPrimary, textSecondary);
-        tabBtnBookmarks = createSidebarTabBtn("책갈피", "bookmarks", textPrimary, textSecondary);
-
-        tabs.addView(tabBtnThumbs, new LinearLayout.LayoutParams(0, dp(34), 1f));
-        tabs.addView(tabBtnAnns, new LinearLayout.LayoutParams(0, dp(34), 1f));
-        tabs.addView(tabBtnBookmarks, new LinearLayout.LayoutParams(0, dp(34), 1f));
-        side.addView(tabs);
-
-        // Sort & Folder Action Row
-        LinearLayout sortRow = new LinearLayout(this);
-        sortRow.setOrientation(LinearLayout.HORIZONTAL);
-        sortRow.setGravity(Gravity.CENTER_VERTICAL);
-        sortRow.setPadding(dp(10), dp(2), dp(10), dp(6));
-
-        final TextView sortBtn = new TextView(this);
-        sortBtn.setText("정렬: 이름순 ▾");
-        sortBtn.setTextColor(textSecondary);
-        sortBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        sortBtn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if ("name".equals(sortOrder)) { sortOrder = "date"; sortBtn.setText("정렬: 날짜순 ▾"); }
-                else if ("date".equals(sortOrder)) { sortOrder = "size"; sortBtn.setText("정렬: 크기순 ▾"); }
-                else { sortOrder = "name"; sortBtn.setText("정렬: 이름순 ▾"); }
-                sortFolderItems();
-                refreshSidebarContent();
-            }
-        });
-        sortRow.addView(sortBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        TextView openFolderChip = new TextView(this);
-        openFolderChip.setText("+ 파일 열기");
-        openFolderChip.setTextColor(0xFF0381FE);
-        openFolderChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        openFolderChip.setTypeface(Typeface.DEFAULT_BOLD);
-        openFolderChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                launchSystemFilePicker();
-            }
-        });
-        sortRow.addView(openFolderChip);
-        side.addView(sortRow);
-
-        // PDF Page Organize Bar (shown when viewing PDF)
-        sidebarPdfActionRow = new LinearLayout(this);
-        sidebarPdfActionRow.setOrientation(LinearLayout.HORIZONTAL);
-        sidebarPdfActionRow.setGravity(Gravity.CENTER_VERTICAL);
-        sidebarPdfActionRow.setPadding(dp(8), dp(4), dp(8), dp(6));
-        sidebarPdfActionRow.setVisibility(View.GONE);
-
-        sidebarPdfActionRow.addView(createSmallActionChip("+ 빈 페이지", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                insertBlankPdfPage();
-            }
-        }));
-        sidebarPdfActionRow.addView(createSmallActionChip("+ 파일 추가", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("*/*");
-                startActivityForResult(intent, REQ_INSERT_PAGE_DOC);
-            }
-        }));
-        sidebarPdfActionRow.addView(createSmallActionChip("페이지 관리", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showPdfPageOrganizeDialog();
-            }
-        }));
-        side.addView(sidebarPdfActionRow);
-
-        // Scrollable Item List
-        ScrollView sv = new ScrollView(this);
-        sv.setFillViewport(true);
-        sidebarListContainer = new LinearLayout(this);
-        sidebarListContainer.setOrientation(LinearLayout.VERTICAL);
-        sidebarListContainer.setPadding(dp(8), dp(4), dp(8), dp(24));
-        sv.addView(sidebarListContainer);
-        side.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        return side;
-    }
-
-    private TextView createSidebarTabBtn(String title, final String tabId, final int textPrimary, final int textSecondary) {
-        final TextView tv = new TextView(this);
-        tv.setText(title);
-        tv.setGravity(Gravity.CENTER);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                sidebarTab = tabId;
-                refreshSidebarContent();
-            }
-        });
-        return tv;
-    }
-
-    private View createSmallActionChip(String label, View.OnClickListener listener) {
-        TextView tv = new TextView(this);
-        tv.setText(label);
-        tv.setTextColor(0xFF0381FE);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setPadding(dp(8), dp(5), dp(8), dp(5));
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(isDarkTheme ? 0x220381FE : 0x140381FE);
-        gd.setCornerRadius(dp(10));
-        tv.setBackground(gd);
-        tv.setOnClickListener(listener);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.rightMargin = dp(6);
-        tv.setLayoutParams(lp);
-        return tv;
-    }
-
-    // ---------- Info / EXIF / Histogram / AI Metadata Panel ----------
-    private LinearLayout buildInfoPanelView(int bgSurface, int borderCol, int textPrimary, int textSecondary) {
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(bgSurface);
-        if (!isTabletLayout) {
-            gd.setCornerRadii(new float[]{dp(24), dp(24), dp(24), dp(24), 0, 0, 0, 0});
-        }
-        gd.setStroke(dp(1), borderCol);
-        panel.setBackground(gd);
-
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(16), dp(10), dp(10), dp(8));
-
-        TextView title = new TextView(this);
-        title.setText("파일 정보 · EXIF · AI 프롬프트");
-        title.setTextColor(textPrimary);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        head.addView(createIconBtn("close", "닫기", textSecondary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                infoVisible = false;
-                updateDrawerAndPanelVisibility();
-            }
-        }));
-        panel.addView(head);
-
-        ScrollView sv = new ScrollView(this);
-        sv.setFillViewport(true);
-        infoContentBody = new LinearLayout(this);
-        infoContentBody.setOrientation(LinearLayout.VERTICAL);
-        infoContentBody.setPadding(dp(14), dp(4), dp(14), dp(28));
-        sv.addView(infoContentBody);
-        panel.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        return panel;
-    }
-
-    // ---------- Search / OCR Bar Overlay ----------
-    private LinearLayout buildSearchBarOverlay(int bgSurface, int borderCol, int textPrimary, int textSecondary) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(10), dp(8), dp(10), dp(8));
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(bgSurface);
-        gd.setCornerRadius(dp(18));
-        gd.setStroke(dp(1), borderCol);
-        box.setBackground(glassOr(gd, true, dp(18)));
-        box.setElevation(dp(4));
-        box.setVisibility(searchBarOpen ? View.VISIBLE : View.GONE);
-
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        row1.setGravity(Gravity.CENTER_VERTICAL);
-
-        searchInputEdit = new EditText(this);
-        searchInputEdit.setHint("텍스트 검색 또는 이미지/PDF OCR...");
-        searchInputEdit.setTextColor(textPrimary);
-        searchInputEdit.setHintTextColor(textSecondary);
-        searchInputEdit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
-        searchInputEdit.setSingleLine(true);
-        searchInputEdit.setBackgroundColor(Color.TRANSPARENT);
-        searchInputEdit.setOnEditorActionListener(new TextView.OnEditorActionListener() {
-            @Override
-            public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
-                executeSearchOrOcr(searchInputEdit.getText().toString());
-                return true;
-            }
-        });
-        row1.addView(searchInputEdit, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        searchCountLabel = new TextView(this);
-        searchCountLabel.setText("0 / 0");
-        searchCountLabel.setTextColor(textSecondary);
-        searchCountLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        searchCountLabel.setPadding(dp(6), 0, dp(6), 0);
-        row1.addView(searchCountLabel);
-
-        row1.addView(createSmallActionChip("찾기", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                executeSearchOrOcr(searchInputEdit.getText().toString());
-            }
-        }));
-
-        row1.addView(createIconBtn("prev", "이전", textPrimary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                stepSearchOrOcr(-1);
-            }
-        }));
-        row1.addView(createIconBtn("next", "다음", textPrimary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                stepSearchOrOcr(1);
-            }
-        }));
-        row1.addView(createSmallActionChip("전체 텍스트", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showFullExtractedTextDialog();
-            }
-        }));
-        row1.addView(createIconBtn("close", "닫기", textSecondary, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                closeSearchBar();
-            }
-        }));
-        box.addView(row1);
-
-        // Replace Row (for Editable Documents)
-        replaceRow = new LinearLayout(this);
-        replaceRow.setOrientation(LinearLayout.HORIZONTAL);
-        replaceRow.setGravity(Gravity.CENTER_VERTICAL);
-        replaceRow.setPadding(0, dp(6), 0, 0);
-        replaceRow.setVisibility("doc".equals(currentKind) ? View.VISIBLE : View.GONE);
-
-        replaceInputEdit = new EditText(this);
-        replaceInputEdit.setHint("바꿀 내용 입력...");
-        replaceInputEdit.setTextColor(textPrimary);
-        replaceInputEdit.setHintTextColor(textSecondary);
-        replaceInputEdit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-        replaceInputEdit.setSingleLine(true);
-        replaceInputEdit.setBackgroundColor(Color.TRANSPARENT);
-        replaceRow.addView(replaceInputEdit, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        replaceRow.addView(createSmallActionChip("바꾸기", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if ("doc".equals(currentKind)) {
-                    int c = nativeDocView.replaceSearch(searchInputEdit.getText().toString(), replaceInputEdit.getText().toString(), false);
-                    toast(c > 0 ? "바꾸었습니다" : "일치하는 항목이 없습니다");
-                }
-            }
-        }));
-        replaceRow.addView(createSmallActionChip("모두 바꾸기", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if ("doc".equals(currentKind)) {
-                    int c = nativeDocView.replaceSearch(searchInputEdit.getText().toString(), replaceInputEdit.getText().toString(), true);
-                    toast(c + "개 항목을 모두 바꾸었습니다");
-                }
-            }
-        }));
-        box.addView(replaceRow);
-
-        return box;
-    }
-
-    private LinearLayout buildTabletStatusBar(int bgSurface, int borderCol, int textSecondary) {
-        LinearLayout sb = new LinearLayout(this);
-        sb.setOrientation(LinearLayout.HORIZONTAL);
-        sb.setGravity(Gravity.CENTER_VERTICAL);
-        sb.setPadding(dp(14), 0, dp(14), 0);
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(bgSurface);
-        gd.setStroke(dp(1), borderCol);
-        sb.setBackground(gd);
-
-        statusLeftText = new TextView(this);
-        statusLeftText.setTextColor(textSecondary);
-        statusLeftText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-
-        statusCenterText = new TextView(this);
-        statusCenterText.setTextColor(textSecondary);
-        statusCenterText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        statusCenterText.setGravity(Gravity.CENTER);
-
-        statusRightText = new TextView(this);
-        statusRightText.setTextColor(textSecondary);
-        statusRightText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        statusRightText.setTypeface(Typeface.MONOSPACE);
-        statusRightText.setGravity(Gravity.RIGHT);
-
-        sb.addView(statusLeftText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        sb.addView(statusCenterText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        sb.addView(statusRightText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        return sb;
-    }
-
-    private FrameLayout buildSlideshowOverlay() {
-        FrameLayout frame = new FrameLayout(this);
-        frame.setBackgroundColor(Color.BLACK);
-        frame.setVisibility(View.GONE);
-
-        slideshowImageView = new ImageView(this);
-        slideshowImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        frame.addView(slideshowImageView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        slideshowCaptionView = new TextView(this);
-        slideshowCaptionView.setTextColor(Color.WHITE);
-        slideshowCaptionView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
-        slideshowCaptionView.setPadding(dp(16), dp(8), dp(16), dp(8));
-        GradientDrawable capBg = new GradientDrawable();
-        capBg.setColor(0x99000000);
-        capBg.setCornerRadius(dp(16));
-        slideshowCaptionView.setBackground(capBg);
-        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        clp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        clp.bottomMargin = dp(32);
-        frame.addView(slideshowCaptionView, clp);
-
-        frame.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                stopSlideshow();
-            }
-        });
-        return frame;
-    }
-
-    private View createIconBtn(String iconName, String contentDesc, int tintColor, View.OnClickListener listener) {
-        ImageView iv = new ImageView(this);
-        int pad = dp(8);
-        iv.setPadding(pad, pad, pad, pad);
-        iv.setImageDrawable(VectorIcons.create(this, iconName, 20f, tintColor));
-        iv.setContentDescription(contentDesc);
-        iv.setMinimumWidth(dp(44)); iv.setMinimumHeight(dp(44));
-        iv.setBackground(null);
-        iv.setOnClickListener(listener);
-        GlassDrawable.attachRecoil(iv);
-        return iv;
-    }
-
-    private void updateDrawerAndPanelVisibility() {
-        if (isTabletLayout && !AdaptiveLayout.dockBoth(windowWidthDp) && !bookLayout && infoVisible) sidebarVisible = false;
-        if (sidebarContainer != null) {
-            sidebarContainer.setVisibility(sidebarVisible ? View.VISIBLE : (bookLayout ? View.INVISIBLE : View.GONE));
-        }
-        if (infoPanelContainer != null) {
-            infoPanelContainer.setVisibility(infoVisible ? View.VISIBLE : View.GONE);
-        }
-        if (mobileScrimView != null) {
-            mobileScrimView.setVisibility((!isTabletLayout && (sidebarVisible || infoVisible)) ? View.VISIBLE : View.GONE);
-        }
     }
 
     private void attachActiveStageView() {
         if (stageHostFrame == null) return;
         stageHostFrame.removeAllViews();
-        if (currentPath.isEmpty()) {
-            stageHostFrame.addView(emptyWelcomeView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        } else if ("image".equals(currentKind) || "pdf".equals(currentKind)) {
-            if (stageCanvasView.getParent() instanceof ViewGroup) {
-                ((ViewGroup) stageCanvasView.getParent()).removeView(stageCanvasView);
-            }
-            stageHostFrame.addView(stageCanvasView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        if (stagePage != null) stagePage.emptyOverlay.setVisibility(hasOpenFile() ? View.GONE : View.VISIBLE);
+        if (!hasOpenFile()) return;
+        if ("image".equals(currentKind) || "pdf".equals(currentKind)) {
+            detachFromParent(stageCanvasView);
+            stageHostFrame.addView(stageCanvasView, match());
         } else if ("doc".equals(currentKind)) {
-            if (nativeDocView.getParent() instanceof ViewGroup) {
-                ((ViewGroup) nativeDocView.getParent()).removeView(nativeDocView);
-            }
-            stageHostFrame.addView(nativeDocView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            detachFromParent(nativeDocView);
+            nativeDocView.setPadding(0, Ui.statusInset + Ui.dp(62), sideInset(), bottomPadding());
+            stageHostFrame.addView(nativeDocView, match());
         } else if ("media".equals(currentKind)) {
-            if (nativeMediaView.getParent() instanceof ViewGroup) {
-                ((ViewGroup) nativeMediaView.getParent()).removeView(nativeMediaView);
-            }
-            stageHostFrame.addView(nativeMediaView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            detachFromParent(nativeMediaView);
+            stageHostFrame.addView(nativeMediaView, match());
         }
     }
 
-    // ---------- Floating One UI Pill Toolbar & Contextual Subbar ----------
-    private void refreshToolbars() {
-        if(mainPillBar==null || subbarContainer==null)return;
-        mainPillBar.removeAllViews();
-        if(currentPath.isEmpty() || "media".equals(currentKind)){floatingToolbarHost.setVisibility(View.GONE);return;}
-        floatingToolbarHost.setVisibility(View.VISIBLE);
-        mainPillBar.setTag("editor-toolbar");mainPillBar.setPadding(dp(8),dp(5),dp(8),dp(5));
-        android.graphics.drawable.Drawable pillBg = glassOr(WelcomeView.surface(isDarkTheme?0xE61C2029:0xE8FFFFFF,dp(30),isDarkTheme?0x33FFFFFF:0x22000000),false,dp(30));
-        GlassDrawable.attachGlass(mainPillBar, pillBg);
-        int ink=isDarkTheme?0xFFF4F6FA:0xFF15181E;
-        if("doc".equals(currentKind)) {
-            addEditorAction("menu","도구",false,ink,v -> showEditorTools(v));
-            View edit=addEditorAction("pen","편집",nativeDocView.isEditing(),ink,v -> {nativeDocView.setEditing(!nativeDocView.isEditing());refreshToolbars();});edit.setEnabled(nativeDocView.canEdit());edit.setAlpha(edit.isEnabled()?1:.35f);
-            addEditorAction("search","찾기",searchBarOpen,ink,v -> toggleSearchBar());
-        }else if("pdf".equals(currentKind)) {
-            addEditorAction("singlePage","페이지",false,ink,v -> showPdfJumpPageDialog());
-            addEditorAction("menu","보기",false,ink,v -> showEditorTools(v));
-            addEditorAction("markup","그리기","markup".equals(stageCanvasView.getActiveTool()),ink,v -> setTool("markup".equals(stageCanvasView.getActiveTool())?"hand":"markup"));
-        }else {
-            addEditorAction("fit","맞춤",false,ink,v -> stageCanvasView.fitToWindow());
-            addEditorAction("sliders","도구",false,ink,v -> showEditorTools(v));
-            addEditorAction("markup","그리기","markup".equals(stageCanvasView.getActiveTool()),ink,v -> setTool("markup".equals(stageCanvasView.getActiveTool())?"hand":"markup"));
-        }
-        addEditorAction("undo","실행 취소",false,ink,v -> {if("image".equals(currentKind))undoImageEdit();else if("pdf".equals(currentKind))undoPdf(false);else nativeDocView.undo();});
-        addEditorAction("save","저장",false,ink,v -> saveCurrentFile(false));
-        refreshSubbar();
-    }
-    private View addEditorAction(String icon,String label,boolean active,int ink,View.OnClickListener action) {
-        LinearLayout button=new LinearLayout(this);button.setOrientation(LinearLayout.VERTICAL);button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(4),dp(6),dp(4),dp(6));button.setMinimumHeight(dp(50));button.setMinimumWidth(dp(46));
-        button.setTag("editor-"+icon);button.setContentDescription(label);button.setFocusable(true);button.setOnClickListener(action);
-        // Clean Prism inner selection capsule with vertical breathing room (never clipped by bar edge)
-        int activeTint = isDarkTheme ? 0x2C387AFF : 0x1A387AFF;
-        button.setBackground(active ? WelcomeView.surface(activeTint, dp(24), 0) : null);
-        GlassDrawable.attachRecoil(button);
-        int fg = active ? WelcomeView.ACCENT : ink;
-        ImageView image=new ImageView(this);image.setImageDrawable(VectorIcons.create(this,icon,20,fg));
-        button.addView(image,new LinearLayout.LayoutParams(dp(20),dp(20)));
-        TextView caption=new TextView(this);caption.setText(label);caption.setTextColor(fg);caption.setTextSize(10f);caption.setGravity(Gravity.CENTER);caption.setMaxLines(1);caption.setPadding(0,dp(2),0,0);
-        if (active) caption.setTypeface(Typeface.DEFAULT_BOLD);
-        button.addView(caption,new LinearLayout.LayoutParams(-1,-2));
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, -2, 1);
-        blp.setMargins(dp(2), dp(2), dp(2), dp(2));
-        mainPillBar.addView(button, blp);return button;
-    }
-    private void showEditorTools(View anchor) {
-        PopupMenu menu=new PopupMenu(this,anchor);
-        if("image".equals(currentKind)) {
-            String[] labels={"이동","영역 선택","자르기","크기 조절","색상 보정","배경 지우기","서명 삽입","왼쪽으로 회전","오른쪽으로 회전","좌우 뒤집기","상하 뒤집기","투명 배경 격자","빈 스케치 새로 만들기","다시 실행"};
-            for(int i=0;i<labels.length;i++)menu.getMenu().add(0,100+i,i,labels[i]);
-        }else if("pdf".equals(currentKind)) {
-            String[] labels={"화면에 맞추기","연속 보기","한 페이지","두 페이지","페이지 관리","서명 삽입","왼쪽으로 회전","오른쪽으로 회전","다시 실행"};
-            for(int i=0;i<labels.length;i++)menu.getMenu().add(0,200+i,i,labels[i]);
-        }else {
-            menu.getMenu().add(0,303,0,"기본 크기");menu.getMenu().add(0,300,1,"글자 확대");menu.getMenu().add(0,301,2,"글자 축소");menu.getMenu().add(0,302,3,"다시 실행");
-        }
-        menu.getMenu().add(0,13,89,"문서 검사기 (정보)");menu.getMenu().add(0,10,90,"이전 파일");menu.getMenu().add(0,11,91,"다음 파일");menu.getMenu().add(0,12,92,bookmarks.contains(currentPath)?"책갈피 해제":"책갈피 추가");
-        menu.setOnMenuItemClickListener(item -> {
-            switch(item.getItemId()) {
-                case 100:setTool("hand");break;case 101:setTool("select");break;case 102:setTool("crop");break;case 103:showResizeImageDialog();break;case 104:setTool("adjust");break;case 105:setTool("alpha");break;
-                case 106:showSignatureDialog(0.5f, 0.5f, 0);break;case 107:rotateCurrentImage(-90);break;case 108:rotateCurrentImage(90);break;case 109:flipCurrentImage(true,false);break;case 110:flipCurrentImage(false,true);break;
-                case 111:stageCanvasView.setShowChecker(!stageCanvasView.isShowChecker());break;case 112:createBlankSketch();break;case 113:redoImageEdit();break;
-                case 200:stageCanvasView.fitToWindow();break;case 201:stageCanvasView.setPdfViewMode("cont");break;case 202:stageCanvasView.setPdfViewMode("single");break;case 203:stageCanvasView.setPdfViewMode("two");break;
-                case 204:showPdfPageOrganizeDialog();break;case 205:showSignatureDialog(0.5f, 0.5f, stageCanvasView.getCurrentPdfPage());break;case 206:rotateCurrentPdfPage(-90);break;case 207:rotateCurrentPdfPage(90);break;case 208:undoPdf(true);break;
-                case 300:nativeDocView.setZoomScale(nativeDocView.getZoomScale()+.15f);break;case 301:nativeDocView.setZoomScale(nativeDocView.getZoomScale()-.15f);break;case 302:nativeDocView.redo();break;
-                case 303:nativeDocView.setZoomScale(1);break;
-                case 13:infoVisible=!infoVisible;updateDrawerAndPanelVisibility();if(infoVisible)refreshInfoPanelContent();break;
-                case 10:navigateFile(-1);break;case 11:navigateFile(1);break;case 12:toggleBookmark(currentPath);break;
-            }
-            refreshToolbars();return true;
-        });menu.show();
-    }
-
-    private void refreshSubbar() {
-        if (subbarContainer == null) return;
-        subbarContainer.removeAllViews();
-        String tool = stageCanvasView.getActiveTool();
-        if ("hand".equals(tool) || currentPath.isEmpty() || "doc".equals(currentKind) || "media".equals(currentKind)) {
-            subbarContainer.setVisibility(View.GONE);
-            return;
-        }
-        subbarContainer.setVisibility(View.VISIBLE);
-
-        GradientDrawable sbBg = new GradientDrawable();
-        sbBg.setColor(isDarkTheme ? 0xE61C2029 : 0xE8FFFFFF);
-        sbBg.setCornerRadius(dp(24));
-        sbBg.setStroke(dp(1), isDarkTheme ? 0x33FFFFFF : 0x22000000);
-        android.graphics.drawable.Drawable sbGlass = glassOr(sbBg, false, dp(24));
-        GlassDrawable.attachGlass(subbarContainer, sbGlass);
-        subbarContainer.setPadding(dp(10), dp(6), dp(10), dp(6));
-        GlassDrawable.popIn(subbarContainer);
-
-        HorizontalScrollView hsv = new HorizontalScrollView(this);
-        hsv.setHorizontalScrollBarEnabled(false);
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        int textCol = isDarkTheme ? 0xFFF1F3F9 : 0xFF181C24;
-
-        if ("select".equals(tool)) {
-            RectF sel = stageCanvasView.getSelectionRect();
-            String label = (sel != null && sel.width() > 2 && sel.height() > 2)
-                    ? ("선택됨: " + Math.round(sel.width()) + " × " + Math.round(sel.height()) + " px")
-                    : "이미지 위를 드래그하여 영역을 선택하세요";
-            TextView tv = new TextView(this);
-            tv.setText(label);
-            tv.setTextColor(textCol);
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-            tv.setPadding(dp(6), 0, dp(10), 0);
-            row.addView(tv);
-
-            row.addView(createSmallActionChip("선택 영역 자르기", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    RectF r = stageCanvasView.getSelectionRect();
-                    if (r == null || r.width() < 4 || r.height() < 4) {
-                        toast("먼저 영역을 드래그해서 선택하세요");
-                        return;
-                    }
-                    pushImageUndo();
-                    Bitmap cropped = ImageEditOps.crop(
-                            stageCanvasView.getImageBitmap(),
-                            Math.round(r.left), Math.round(r.top),
-                            Math.round(r.width()), Math.round(r.height())
-                    );
-                    stageCanvasView.setImageContent(cropped, null, new ArrayList<MarkupModel.Annotation>(), true);
-                    markModified();
-                    setTool("hand");
-                }
-            }));
-            row.addView(createSmallActionChip("선택 해제", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    stageCanvasView.clearSelection();
-                    refreshSubbar();
-                }
-            }));
-        } else if ("crop".equals(tool)) {
-            float[][] ratios = {{0f, 0f}, {1f, 1f}, {4f, 3f}, {16f, 9f}, {3f, 2f}};
-            String[] rLabels = {"자유 비율", "1:1", "4:3", "16:9", "3:2"};
-            for (int i = 0; i < rLabels.length; i++) {
-                final float rVal = ratios[i][0] == 0f ? 0f : (ratios[i][0] / ratios[i][1]);
-                row.addView(createSmallActionChip(rLabels[i], new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        stageCanvasView.setCropAspect(rVal);
-                    }
-                }));
-            }
-            row.addView(createSmallActionChip("✓ 자르기 적용", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    RectF r = stageCanvasView.getCropRect();
-                    if (r.width() >= 4 && r.height() >= 4) {
-                        pushImageUndo();
-                        Bitmap cropped = ImageEditOps.crop(
-                                stageCanvasView.getImageBitmap(),
-                                Math.round(r.left), Math.round(r.top),
-                                Math.round(r.width()), Math.round(r.height())
-                        );
-                        stageCanvasView.setImageContent(cropped, null, new ArrayList<MarkupModel.Annotation>(), true);
-                        markModified();
-                        updateHeaderTitles();
-                        updateStatusBar();
-                    }
-                    setTool("hand");
-                }
-            }));
-            row.addView(createSmallActionChip("취소", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    setTool("hand");
-                }
-            }));
-        } else if ("adjust".equals(tool)) {
-            row.addView(createSmallActionChip("슬라이더 상세 조절", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    showColorAdjustDialog();
-                }
-            }));
-            row.addView(createSmallActionChip("자동 레벨 (Auto)", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    if (stageCanvasView.getImageBitmap() != null) {
-                        pushImageUndo();
-                        Bitmap autoBmp = ImageEditOps.autoLevels(stageCanvasView.getImageBitmap());
-                        stageCanvasView.setImageContent(autoBmp, null, stageCanvasView.getImageAnnotations(), false);
-                        markModified();
-                        toast("자동 레벨 보정을 적용했습니다");
-                    }
-                }
-            }));
-            row.addView(createSmallActionChip("세피아", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    adjSepia = !adjSepia;
-                    updateLiveAdjustPreview();
-                }
-            }));
-            row.addView(createSmallActionChip("색상 반전", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    adjInvert = !adjInvert;
-                    updateLiveAdjustPreview();
-                }
-            }));
-            row.addView(createSmallActionChip("✓ 적용", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    commitColorAdjustments();
-                }
-            }));
-            row.addView(createSmallActionChip("초기화", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    resetColorAdjustments();
-                }
-            }));
-        } else if ("alpha".equals(tool)) {
-            TextView guide = new TextView(this);
-            guide.setText("배경으로 지울 색상을 터치하세요 (허용치 " + alphaTolerance + ")");
-            guide.setTextColor(textCol);
-            guide.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-            guide.setPadding(dp(4), 0, dp(8), 0);
-            row.addView(guide);
-
-            row.addView(createSmallActionChip(alphaContiguous ? "인접 영역만" : "전체 동일색상", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    alphaContiguous = !alphaContiguous;
-                    refreshSubbar();
-                }
-            }));
-            row.addView(createSmallActionChip("허용치 -", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    alphaTolerance = Math.max(5, alphaTolerance - 10);
-                    refreshSubbar();
-                }
-            }));
-            row.addView(createSmallActionChip("허용치 +", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    alphaTolerance = Math.min(140, alphaTolerance + 10);
-                    refreshSubbar();
-                }
-            }));
-            row.addView(createSmallActionChip("완료", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    setTool("hand");
-                }
-            }));
-        } else if ("markup".equals(tool)) {
-            String curKind = stageCanvasView.getMarkupKind();
-            String[][] mTools = {
-                    {"select", "선택"}, {"pen", "펜"}, {"hl", "형광펜"},
-                    {"line", "직선"}, {"arrow", "화살표"}, {"rect", "사각형"},
-                    {"ellipse", "원"}, {"text", "텍스트"}, {"redact", "가리기"}, {"sign", "서명"}
-            };
-            for (final String[] mt : mTools) {
-                boolean active = mt[0].equals(curKind);
-                row.addView(createPillTextBtn(mt[1], active, textCol, new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        stageCanvasView.setMarkupOptions(
-                                mt[0],
-                                stageCanvasView.getMarkupColor(),
-                                stageCanvasView.getMarkupWidth(),
-                                stageCanvasView.getMarkupFontSize(),
-                                stageCanvasView.isMarkupFill()
-                        );
-                        refreshSubbar();
-                    }
-                }));
-            }
-            row.addView(createToolbarDivider());
-
-            // Color Swatches
-            final int[] colors = {0xFFE53935, 0xFFFFB300, 0xFF43A047, 0xFF0381FE, 0xFF8E24AA, 0xFFFFFFFF, 0xFF111111};
-            for (final int c : colors) {
-                View swatch = new View(this);
-                GradientDrawable sgd = new GradientDrawable();
-                sgd.setShape(GradientDrawable.OVAL);
-                sgd.setColor(c);
-                sgd.setStroke(dp(c == stageCanvasView.getMarkupColor() ? 2.5f : 1f),
-                        c == stageCanvasView.getMarkupColor() ? 0xFF0381FE : 0x88888888);
-                swatch.setBackground(sgd);
-                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(22), dp(22));
-                slp.leftMargin = dp(4);
-                slp.rightMargin = dp(4);
-                swatch.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        stageCanvasView.setMarkupOptions(
-                                stageCanvasView.getMarkupKind(),
-                                c,
-                                stageCanvasView.getMarkupWidth(),
-                                stageCanvasView.getMarkupFontSize(),
-                                stageCanvasView.isMarkupFill()
-                        );
-                        refreshSubbar();
-                    }
-                });
-                row.addView(swatch, slp);
-            }
-            row.addView(createToolbarDivider());
-
-            // Stroke Width Cycle
-            final float curW = stageCanvasView.getMarkupWidth();
-            row.addView(createSmallActionChip("굵기 " + Math.round(curW) + "pt", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    float nextW = curW < 3f ? 3f : curW < 6f ? 6f : curW < 10f ? 10f : 1.5f;
-                    stageCanvasView.setMarkupOptions(
-                            stageCanvasView.getMarkupKind(),
-                            stageCanvasView.getMarkupColor(),
-                            nextW,
-                            stageCanvasView.getMarkupFontSize(),
-                            stageCanvasView.isMarkupFill()
-                    );
-                    refreshSubbar();
-                }
-            }));
-
-            // Fill toggle
-            row.addView(createSmallActionChip(stageCanvasView.isMarkupFill() ? "채우기 ON" : "채우기 OFF", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    stageCanvasView.setMarkupOptions(
-                            stageCanvasView.getMarkupKind(),
-                            stageCanvasView.getMarkupColor(),
-                            stageCanvasView.getMarkupWidth(),
-                            stageCanvasView.getMarkupFontSize(),
-                            !stageCanvasView.isMarkupFill()
-                    );
-                    refreshSubbar();
-                }
-            }));
-
-            // Delete Selected Annotation
-            if (stageCanvasView.findSelectedAnnotation() != null) {
-                row.addView(createSmallActionChip("선택 주석 삭제", new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if (stageCanvasView.deleteSelectedAnnotation()) {
-                            markModified();
-                            refreshSubbar();
-                            if (sidebarVisible) refreshSidebarContent();
-                        }
-                    }
-                }));
-            }
-
-            if ("image".equals(currentKind) && !stageCanvasView.getImageAnnotations().isEmpty()) {
-                row.addView(createSmallActionChip("이미지에 병합", new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        pushImageUndo();
-                        Bitmap flat = MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations());
-                        stageCanvasView.setImageContent(flat, null, new ArrayList<MarkupModel.Annotation>(), false);
-                        markModified();
-                        toast("주석을 이미지 픽셀에 병합했습니다");
-                        refreshSubbar();
-                    }
-                }));
-            }
-        }
-
-        hsv.addView(row);
-        subbarContainer.addView(hsv);
-    }
-
-    private View createPillToolBtn(String iconName, String label, boolean active, int defaultTint, View.OnClickListener listener) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.HORIZONTAL);
-        box.setGravity(Gravity.CENTER);
-        int padH = dp(label != null ? 10 : 8);
-        int padV = dp(6);
-        box.setPadding(padH, padV, padH, padV);
-        if (active) {
-            GradientDrawable gd = new GradientDrawable();
-            gd.setColor(0xFF0381FE);
-            gd.setCornerRadius(dp(18));
-            box.setBackground(gd);
-        }
-        int col = active ? Color.WHITE : defaultTint;
-        ImageView iv = new ImageView(this);
-        iv.setImageDrawable(VectorIcons.create(this, iconName, 19f, col));
-        box.addView(iv, new LinearLayout.LayoutParams(dp(20), dp(20)));
-        if (label != null && !label.isEmpty()) {
-            TextView tv = new TextView(this);
-            tv.setText(label);
-            tv.setTextColor(col);
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-            tv.setTypeface(Typeface.DEFAULT_BOLD);
-            tv.setPadding(dp(5), 0, 0, 0);
-            box.addView(tv);
-        }
-        box.setOnClickListener(listener);
-        box.setMinimumWidth(dp(48)); box.setMinimumHeight(dp(48));
-        box.setContentDescription(label == null ? toolDescription(iconName) : label); box.setFocusable(true);
-        return box;
-    }
-
-    private String toolDescription(String icon) {
-        switch (icon) {
-            case "prev": return "이전 파일"; case "next": return "다음 파일";
-            case "zoomOut": return "축소"; case "zoomIn": return "확대"; case "fit": return "화면에 맞추기";
-            case "rotL": return "왼쪽으로 회전"; case "rotR": return "오른쪽으로 회전";
-            case "flipH": return "좌우 뒤집기"; case "flipV": return "상하 뒤집기";
-            case "undo": return "실행 취소"; case "redo": return "다시 실행";
-            case "save": return "저장"; case "export": return "내보내기"; case "play": return "슬라이드쇼";
-            case "checker": return "투명 배경 표시"; case "bookmark": return "책갈피"; case "trash": return "삭제";
-            default: return "보기 도구";
-        }
-    }
-    private View createPillTextBtn(String text, boolean active, int defaultCol, View.OnClickListener listener) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextColor(active ? WelcomeView.ACCENT : defaultCol);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        tv.setTypeface(Typeface.create("sans-serif", active ? Typeface.BOLD : Typeface.NORMAL));
-        tv.setPadding(dp(12), dp(6), dp(12), dp(6));
-        if (active) {
-            GradientDrawable gd = new GradientDrawable();
-            gd.setColor(isDarkTheme ? 0x30387AFF : 0x1D387AFF);
-            gd.setCornerRadius(dp(17));
-            tv.setBackground(gd);
-        }
-        tv.setOnClickListener(listener);
-        GlassDrawable.attachRecoil(tv);
-        tv.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34));
-        lp.leftMargin = dp(2);
-        lp.rightMargin = dp(2);
-        tv.setLayoutParams(lp);
-        return tv;
-    }
-
-    private View createToolbarDivider() {
-        View v = new View(this);
-        v.setBackgroundColor(isDarkTheme ? 0x33FFFFFF : 0x22000000);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(1), dp(20));
-        lp.leftMargin = dp(4);
-        lp.rightMargin = dp(4);
-        v.setLayoutParams(lp);
-        return v;
-    }
-
-    private void setTool(String tool) {
-        if ("adjust".equals(stageCanvasView.getActiveTool()) && !"adjust".equals(tool)) {
-            resetColorAdjustments();
-        }
+    void setTool(String tool) {
+        if ("adjust".equals(stageCanvasView.getActiveTool()) && !"adjust".equals(tool)) resetColorAdjustments();
         stageCanvasView.setActiveTool(tool);
-        if ("adjust".equals(tool)) {
-            showColorAdjustDialog();
-        }
-        refreshToolbars();
+        if ("adjust".equals(tool)) showColorAdjustDialog();
+        syncChromeState();
     }
 
-    // ---------- File Loading & Non-Rooted Content URI Handling ----------
+    // ---- File Open / Intent / Folder / Capture / Camera / Sketch ----
     private boolean handleIncomingIntent(Intent intent) {
         if (intent == null) return false;
         List<Uri> incoming = new ArrayList<>();
         Uri data = intent.getData();
         if (data != null) incoming.add(data);
-        if (intent.getClipData() != null) for (int i = 0; i < intent.getClipData().getItemCount(); i++) { Uri uri = intent.getClipData().getItemAt(i).getUri(); if (uri != null && !incoming.contains(uri)) incoming.add(uri); }
-        if (Intent.ACTION_SEND.equals(intent.getAction())) { Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM); if (uri != null && !incoming.contains(uri)) incoming.add(uri); }
-        if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) { ArrayList<Uri> uris = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM); if (uris != null) for (Uri uri : uris) if (!incoming.contains(uri)) incoming.add(uri); }
+        if (intent.getClipData() != null) {
+            for (int i = 0; i < intent.getClipData().getItemCount(); i++) {
+                Uri uri = intent.getClipData().getItemAt(i).getUri();
+                if (uri != null && !incoming.contains(uri)) incoming.add(uri);
+            }
+        }
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (uri != null && !incoming.contains(uri)) incoming.add(uri);
+        }
+        if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+            ArrayList<Uri> uris = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (uris != null) for (Uri uri : uris) if (!incoming.contains(uri)) incoming.add(uri);
+        }
         if (incoming.isEmpty()) return false;
-        openUris(incoming, intent.getFlags()); return true;
+        openUris(incoming, intent.getFlags());
+        return true;
     }
 
     private File copyContentUriToInbox(Uri uri) {
         if (uri == null) return null;
-        try {
-            return documents.importFile(uri);
-        } catch (Exception e) { toast("파일을 가져올 수 없습니다: " + e.getMessage()); return null; }
+        try { return documents.importFile(uri); }
+        catch (Exception e) { toast("파일을 가져올 수 없습니다: " + e.getMessage()); return null; }
     }
-    private void openUris(List<Uri> uris, int flags) { openUris(uris,flags,() -> {}); }
-    private void openUris(List<Uri> uris, int flags, Runnable completed) {
-        final List<Uri> files=FileDrop.localUris(uris); final Runnable finish=FileDrop.once(completed);
-        if(files.isEmpty()){finish.run();return;}
+
+    void openUris(List<Uri> uris, int flags) { openUris(uris, flags, () -> {}); }
+
+    void openUris(List<Uri> uris, int flags, Runnable completed) {
+        final List<Uri> files = FileDrop.localUris(uris);
+        final Runnable finish = FileDrop.once(completed);
+        if (files.isEmpty()) { finish.run(); return; }
         guardChanges(() -> {
-            final int ticket=++openTicket;
-            if(emptyWelcomeView instanceof WelcomeView)((WelcomeView)emptyWelcomeView).setOpening(true);
-            try { filePool.execute(() -> {
-                List<FileEntry> entries=new ArrayList<>();
-                try {
-                    for(Uri uri:files) {
-                        if(ticket!=openTicket || Thread.currentThread().isInterrupted())return;
-                        documents.retain(uri,flags); File file=copyContentUriToInbox(uri);
-                        if(file!=null && !FileOps.kindOf(file.getName()).isEmpty())entries.add(new FileEntry(file.getAbsolutePath(),file.getName(),FileOps.kindOf(file.getName()),file.length(),file.lastModified()));
+            final int ticket = ++openTicket;
+            try {
+                filePool.execute(() -> {
+                    List<FileEntry> entries = new ArrayList<>();
+                    try {
+                        for (Uri uri : files) {
+                            if (ticket != openTicket || Thread.currentThread().isInterrupted()) return;
+                            documents.retain(uri, flags);
+                            File file = copyContentUriToInbox(uri);
+                            if (file != null && !FileOps.kindOf(file.getName()).isEmpty()) {
+                                entries.add(new FileEntry(file.getAbsolutePath(), file.getName(), FileOps.kindOf(file.getName()), file.length(), file.lastModified()));
+                            }
+                        }
+                        mainHandler.post(() -> {
+                            if (isFinishing() || isDestroyed() || ticket != openTicket) return;
+                            if (entries.isEmpty()) { toast("열 수 있는 파일이 없습니다."); return; }
+                            guardChanges(() -> {
+                                folderItems.clear();
+                                folderItems.addAll(entries);
+                                openFileUnchecked(entries.get(0).path);
+                            });
+                        });
+                    } finally {
+                        finish.run();
                     }
-                    mainHandler.post(() -> {
-                        if(isFinishing() || isDestroyed() || ticket!=openTicket)return;
-                        if(entries.isEmpty()){toast("열 수 있는 파일이 없습니다.");return;}
-                        guardChanges(() -> {folderItems.clear();folderItems.addAll(entries);openFileUnchecked(entries.get(0).path);});
-                    });
-                } finally {finish.run();mainHandler.post(() -> {if(ticket==openTicket && emptyWelcomeView instanceof WelcomeView)((WelcomeView)emptyWelcomeView).setOpening(false);});}
-            }); } catch(java.util.concurrent.RejectedExecutionException closed) { finish.run(); }
-        },finish);
+                });
+            } catch (java.util.concurrent.RejectedExecutionException closed) {
+                finish.run();
+            }
+        }, finish);
     }
-    private void guardChanges(Runnable action) {
-        guardChanges(action,() -> {});
-    }
+
+    private void guardChanges(Runnable action) { guardChanges(action, () -> {}); }
+
     private void guardChanges(Runnable action, Runnable cancelled) {
         if (!isModified) { action.run(); return; }
-        new AlertDialog.Builder(this).setTitle("변경 내용을 저장할까요?").setMessage("저장하지 않은 편집 내용이 있습니다.")
-            .setNegativeButton("계속 편집", (d,w) -> cancelled.run()).setOnCancelListener(d -> cancelled.run()).setNeutralButton("변경 버리기", (d,w) -> { isModified = false; action.run(); })
-            .setPositiveButton("저장 후 계속", (d,w) -> { afterSave = action; afterSaveCancelled=cancelled; saveCurrentFile(false); }).show();
-    }
-    private void cancelAfterSave(){Runnable cancelled=afterSaveCancelled;afterSave=afterSaveCancelled=null;if(cancelled!=null)cancelled.run();}
-    private void chooseFolder() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        startActivityForResult(intent, REQ_OPEN_TREE);
-    }
-    private void showTreeFolder(Uri tree, String parentId) {
-        bgPool.execute(() -> {
-            try {
-                List<DocumentStore.Entry> entries = documents.children(tree, parentId);
-                List<String> labels = new ArrayList<>(); for (DocumentStore.Entry entry : entries) labels.add((entry.directory ? "폴더 · " : "") + entry.name);
-                mainHandler.post(() -> new AlertDialog.Builder(this).setTitle("선택한 폴더").setItems(labels.toArray(new String[0]), (d,w) -> {
-                    DocumentStore.Entry chosen = entries.get(w);
-                    if (chosen.directory) { showTreeFolder(tree, android.provider.DocumentsContract.getDocumentId(chosen.uri)); return; }
-                    guardChanges(() -> {
-                        try {
-                            folderItems.clear(); String selected = "";
-                            for (DocumentStore.Entry entry : entries) if (!entry.directory) {
-                                String path = documents.register(entry.uri, entry.name);
-                                folderItems.add(new FileEntry(path, entry.name, FileOps.kindOf(entry.name), entry.size, entry.modified));
-                                if (entry == chosen) selected = path;
-                            }
-                            sortFolderItems(); openFileAtPath(selected);
-                        } catch (Exception e) { toast(e.getMessage()); }
-                    });
-                }).setNegativeButton("닫기", null).setNeutralButton("폴더 다시 선택", (d,w) -> chooseFolder()).show());
-            } catch (Exception e) { toast("폴더를 열 수 없습니다: " + e.getMessage()); }
-        });
-    }
-    private void loadFolderList(String dirPath, String selectFilePath) {
-        folderItems.clear();
-        File dir = new File(dirPath);
-        if (dir.exists() && dir.isFile()) {
-            selectFilePath = dir.getAbsolutePath();
-            dir = dir.getParentFile();
-        }
-        if (dir != null && dir.exists() && dir.isDirectory()) {
-            File[] raw = dir.listFiles();
-            if (raw != null) {
-                for (File f : raw) {
-                    if (f.isFile() && !f.getName().startsWith(".")) {
-                        String k = FileOps.kindOf(f.getName());
-                        if (!k.isEmpty()) {
-                            folderItems.add(new FileEntry(f.getAbsolutePath(), f.getName(), k, f.length(), f.lastModified()));
-                        }
-                    }
-                }
-            }
-        }
-        sortFolderItems();
-
-        if (selectFilePath != null) {
-            openFileAtPath(selectFilePath);
-        } else if (!folderItems.isEmpty()) {
-            openFileAtPath(folderItems.get(0).path);
-        } else {
-            currentPath = "";
-            currentKind = "";
-            attachActiveStageView();
-            updateHeaderTitles();
-            refreshToolbars();
-            refreshSidebarContent();
-        }
+        new AlertDialog.Builder(this)
+                .setTitle("변경 내용을 저장할까요?")
+                .setMessage("저장하지 않은 편집 내용이 있습니다.")
+                .setNegativeButton("계속 편집", (d, w) -> cancelled.run())
+                .setOnCancelListener(d -> cancelled.run())
+                .setNeutralButton("변경 버리기", (d, w) -> { isModified = false; action.run(); })
+                .setPositiveButton("저장 후 계속", (d, w) -> { afterSave = action; afterSaveCancelled = cancelled; saveCurrentFile(false); })
+                .show();
     }
 
-    private void sortFolderItems() {
-        Collections.sort(folderItems, new Comparator<FileEntry>() {
-            @Override
-            public int compare(FileEntry a, FileEntry b) {
-                if ("date".equals(sortOrder)) return Long.compare(b.lastModified, a.lastModified);
-                if ("size".equals(sortOrder)) return Long.compare(b.size, a.size);
-                return Util.NATURAL_SORT.compare(a.name, b.name);
-            }
-        });
-        currentFileIndex = -1;
-        for (int i = 0; i < folderItems.size(); i++) {
-            if (folderItems.get(i).path.equalsIgnoreCase(currentPath)) {
-                currentFileIndex = i;
-                break;
-            }
-        }
+    private void cancelAfterSave() {
+        Runnable c = afterSaveCancelled;
+        afterSave = afterSaveCancelled = null;
+        if (c != null) c.run();
     }
 
-    public void openFileAtPath(final String path) {
-        guardChanges(() -> openFileUnchecked(path));
-    }
+    public void openFileAtPath(final String path) { guardChanges(() -> openFileUnchecked(path)); }
+
     private void openFileUnchecked(final String path) {
         if (path == null || path.isEmpty()) return;
         try { documents.ensureLocal(path); } catch (Exception e) { toast("파일을 읽을 수 없습니다: " + e.getMessage()); return; }
         final File f = new File(path);
-        if (!f.exists()) {
-            toast("파일이 존재하지 않습니다");
-            return;
-        }
-        boolean fromWelcome=currentPath.isEmpty();
+        if (!f.exists()) { toast("파일이 존재하지 않습니다"); return; }
+
         nativeMediaView.stopMedia();
         searchTicket++; imageLoadTicket++; PdfHost.closeAll();
         currentPath = f.getAbsolutePath();
         currentKind = FileOps.kindOf(currentPath);
         isModified = false;
-        flattenedPdfApproved = false; pdfUndo.clear(); pdfRedo.clear(); lastPdfKey = "";
-        imgUndoStack.clear();
-        imgRedoStack.clear();
-        currentOcrBoxes.clear();
-        activeOcrHit = -1;
-        fullExtractedOcrText = "";
+        flattenedPdfApproved = false;
+        pdfUndo.clear(); pdfRedo.clear(); lastPdfKey = "";
+        imgUndoStack.clear(); imgRedoStack.clear();
+        currentOcrBoxes.clear(); activeOcrHit = -1; fullExtractedOcrText = "";
 
-        // Sync folder items if opened from a different folder
         boolean foundInFolder = false;
         for (int i = 0; i < folderItems.size(); i++) {
             if (folderItems.get(i).path.equalsIgnoreCase(currentPath)) {
@@ -2058,63 +1518,61 @@ public class MainActivity extends Activity {
             }
         }
 
-        if(fromWelcome)buildCompleteNativeUI();else attachActiveStageView();
+        attachActiveStageView();
+        switchTab(1);
 
         if ("image".equals(currentKind)) {
             loadOriginalImage(currentPath);
         } else if ("pdf".equals(currentKind)) {
-            stageCanvasView.clearContent(); openPdfWithPassword(currentPath, "");
+            stageCanvasView.clearContent();
+            openPdfWithPassword(currentPath, "");
         } else if ("doc".equals(currentKind)) {
             nativeDocView.loadDocument(currentPath);
         } else if ("media".equals(currentKind)) {
             nativeMediaView.loadMedia(currentPath);
         }
 
-        if (replaceRow != null) {
-            replaceRow.setVisibility("doc".equals(currentKind) ? View.VISIBLE : View.GONE);
-        }
-        if (sidebarPdfActionRow != null) {
-            sidebarPdfActionRow.setVisibility("pdf".equals(currentKind) ? View.VISIBLE : View.GONE);
-        }
-
-        updateHeaderTitles();
-        refreshToolbars();
-        updateStatusBar();
-        if (sidebarVisible) refreshSidebarContent();
-        if (infoVisible) refreshInfoPanelContent();
+        if (homePage != null) homePage.rebuild();
+        if (filesPage != null) filesPage.refresh();
+        syncChromeState();
     }
 
     private void loadOriginalImage(String path) {
-        final int ticket=imageLoadTicket;
-        stageCanvasView.clearContent();stageCanvasView.setActiveTool("hand");
-        final android.widget.ProgressBar loading=new android.widget.ProgressBar(this);
-        loading.setTag("image-loading");loading.setContentDescription("원본 이미지를 여는 중");
-        stageHostFrame.addView(loading,new FrameLayout.LayoutParams(dp(40),dp(40),Gravity.CENTER));
+        final int ticket = imageLoadTicket;
+        stageCanvasView.clearContent();
+        stageCanvasView.setActiveTool("hand");
         bgPool.execute(() -> {
-            Bitmap bitmap=null;Movie movie=null;String error=null;
+            Bitmap bitmap = null;
+            Movie movie = null;
+            String error = null;
             try {
-                bitmap=ImageEditOps.decodeOriginal(path);
-                if(".gif".equals(Util.extOf(path)))try{byte[] bytes=Util.readAllBytes(new File(path));movie=Movie.decodeByteArray(bytes,0,bytes.length);if(movie!=null && movie.duration()<=0)movie=null;}catch(Exception|OutOfMemoryError ignored){}
-            }catch(Exception failure){error=failure.getMessage();}
-            final Bitmap ready=bitmap;final Movie gif=movie;final String problem=error;
+                bitmap = ImageEditOps.decodeOriginal(path);
+                if (".gif".equals(Util.extOf(path))) {
+                    try {
+                        byte[] bytes = Util.readAllBytes(new File(path));
+                        movie = Movie.decodeByteArray(bytes, 0, bytes.length);
+                        if (movie != null && movie.duration() <= 0) movie = null;
+                    } catch (Exception | OutOfMemoryError ignored) {}
+                }
+            } catch (Exception failure) {
+                error = failure.getMessage();
+            }
+            final Bitmap ready = bitmap;
+            final Movie gif = movie;
+            final String problem = error;
             mainHandler.post(() -> {
-                if(loading.getParent() instanceof ViewGroup)((ViewGroup)loading.getParent()).removeView(loading);
-                if(isFinishing() || isDestroyed() || ticket!=imageLoadTicket || !path.equals(currentPath)){if(ready!=null)ready.recycle();return;}
-                if(ready==null){toast(problem==null?"이미지를 열 수 없습니다.":problem);return;}
-                stageCanvasView.setImageContent(ready,gif,new ArrayList<MarkupModel.Annotation>(),true);
-                updateHeaderTitles();updateStatusBar();refreshSidebarContent();refreshToolbars();
-                if(slideshowRunning)updateSlideshowView();
+                if (isFinishing() || isDestroyed() || ticket != imageLoadTicket || !path.equals(currentPath)) {
+                    if (ready != null) ready.recycle();
+                    return;
+                }
+                if (ready == null) { toast(problem == null ? "이미지를 열 수 없습니다." : problem); return; }
+                stageCanvasView.setImageContent(ready, gif, new ArrayList<>(), true);
+                syncChromeState();
+                if (slideshowRunning) updateSlideshowView();
             });
         });
     }
-    private void navigateFile(int delta) {
-        if (folderItems.isEmpty()) return;
-        int nextIdx = (currentFileIndex + delta + folderItems.size()) % folderItems.size();
-        openFileAtPath(folderItems.get(nextIdx).path);
-        if (slideshowRunning) {
-            updateSlideshowView();
-        }
-    }
+
     private void openPdfWithPassword(final String path, String password) {
         Map<String, Object> result = PdfHost.open(path, password);
         if (!Boolean.TRUE.equals(result.get("ok"))) {
@@ -2122,606 +1580,371 @@ public class MainActivity extends Activity {
                 final EditText input = new EditText(this);
                 input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
                 input.setHint("PDF 암호");
-                new AlertDialog.Builder(this).setTitle("암호로 보호된 PDF").setMessage(String.valueOf(result.get("error"))).setView(input)
-                    .setNegativeButton("취소", null).setPositiveButton("열기", (d, w) -> { if (path.equals(currentPath)) openPdfWithPassword(path, input.getText().toString()); }).show();
+                new AlertDialog.Builder(this).setTitle("암호로 보호된 PDF").setMessage(String.valueOf(result.get("error")))
+                        .setView(input).setNegativeButton("취소", null)
+                        .setPositiveButton("열기", (d, w) -> { if (path.equals(currentPath)) openPdfWithPassword(path, input.getText().toString()); })
+                        .show();
             } else toast(String.valueOf(result.get("error")));
             return;
         }
-        int count = PdfHost.getPageCount(path); List<MarkupModel.PdfPageItem> pages = new ArrayList<>(count);
-        for (int i = 0; i < count; i++) { float[] size = PdfHost.getPageSizePt(path, i); pages.add(new MarkupModel.PdfPageItem("p_" + i, "pdf", path, i, size[0], size[1])); }
-        stageCanvasView.setActiveTool("hand"); stageCanvasView.setPdfContent(pages, stageCanvasView.getPdfViewMode(), 0);
+        int count = PdfHost.getPageCount(path);
+        List<MarkupModel.PdfPageItem> pages = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            float[] size = PdfHost.getPageSizePt(path, i);
+            pages.add(new MarkupModel.PdfPageItem("p_" + i, "pdf", path, i, size[0], size[1]));
+        }
+        stageCanvasView.setActiveTool("hand");
+        stageCanvasView.setPdfContent(pages, stageCanvasView.getPdfViewMode(), 0);
         recordPdfState();
-        refreshSidebarContent(); refreshToolbars(); updateStatusBar();
+        if (filesPage != null) filesPage.refresh();
+        syncChromeState();
     }
 
-    private void updateHeaderTitles() {
-        if (headerTitleView == null || headerSubView == null) return;
-        if (currentPath.isEmpty()) {
-            headerTitleView.setText("Samsung Viewer");
-            headerSubView.setText("파일을 선택하세요");
-            return;
-        }
-        File f = new File(currentPath);
-        headerTitleView.setText((isModified ? "● " : "") + f.getName());
-        String pos = folderItems.isEmpty() ? "" : ((currentFileIndex + 1) + " / " + folderItems.size() + " · ");
-        if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
-            Bitmap b = stageCanvasView.getImageBitmap();
-            headerSubView.setText(pos + b.getWidth() + "×" + b.getHeight() + " px · " + fmtBytes(f.length()));
-        } else if ("pdf".equals(currentKind)) {
-            int p = stageCanvasView.getCurrentPdfPage() + 1;
-            int tot = stageCanvasView.getPdfPages().size();
-            headerSubView.setText(pos + "PDF " + p + " / " + tot + " 페이지 · " + fmtBytes(f.length()));
-        } else {
-            headerSubView.setText(pos + Util.extOf(currentPath).toUpperCase(Locale.ROOT).replace(".", "") + " · " + fmtBytes(f.length()));
-        }
+    void closeCurrentFile() {
+        guardChanges(() -> {
+            openTicket++; imageLoadTicket++; searchTicket++;
+            nativeMediaView.stopMedia();
+            PdfHost.closeAll();
+            stageCanvasView.clearContent();
+            stageCanvasView.setActiveTool("hand");
+            currentPath = "";
+            currentKind = "";
+            folderItems.clear();
+            currentFileIndex = -1;
+            isModified = false;
+            imgUndoStack.clear(); imgRedoStack.clear();
+            pdfUndo.clear(); pdfRedo.clear();
+            attachActiveStageView();
+            switchTab(0);
+            if (homePage != null) homePage.rebuild();
+            if (filesPage != null) filesPage.refresh();
+            syncChromeState();
+        });
     }
 
-    private void updateStatusBar() {
-        if (statusLeftText == null || statusCenterText == null || statusRightText == null) return;
-        if (currentPath.isEmpty()) {
-            statusLeftText.setText("준비됨");
-            statusCenterText.setText("");
-            statusRightText.setText("9.5.0");
-            return;
-        }
-        File f = new File(currentPath);
-        String idxStr = folderItems.isEmpty() ? "1 / 1" : ((currentFileIndex + 1) + " / " + folderItems.size());
-        statusLeftText.setText(idxStr + "  |  " + f.getName() + "  |  " + fmtBytes(f.length()));
-
-        if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
-            Bitmap b = stageCanvasView.getImageBitmap();
-            statusCenterText.setText(b.getWidth() + " × " + b.getHeight() + " px  |  배율 " + Math.round(stageCanvasView.getZoom() * 100f) + "%");
-        } else if ("pdf".equals(currentKind)) {
-            statusCenterText.setText("페이지 " + (stageCanvasView.getCurrentPdfPage() + 1) + " / " + stageCanvasView.getPdfPages().size()
-                    + "  |  배율 " + Math.round(stageCanvasView.getZoom() * 100f) + "%");
-        } else if ("doc".equals(currentKind)) {
-            statusCenterText.setText("문서 뷰어  |  배율 " + Math.round(nativeDocView.getZoomScale() * 100f) + "%");
-        } else {
-            statusCenterText.setText("미디어 플레이어");
-        }
+    void openSampleFiles() {
+        guardChanges(() -> {
+            SampleSeeder.ensureSeeded(sampleDir);
+            loadFolderList(sampleDir.getAbsolutePath(), null);
+        });
     }
 
-    // ---------- Populate Sidebar Content ----------
-    private void refreshSidebarContent() {
-        if (sidebarListContainer == null) return;
-        sidebarListContainer.removeAllViews();
-
-        int activeCol = 0xFF0381FE;
-        int inactiveCol = isDarkTheme ? 0xFF9AA3B5 : 0xFF5D6575;
-        if (tabBtnThumbs != null) {
-            tabBtnThumbs.setTextColor("thumbs".equals(sidebarTab) ? activeCol : inactiveCol);
-            tabBtnAnns.setTextColor("anns".equals(sidebarTab) ? activeCol : inactiveCol);
-            tabBtnBookmarks.setTextColor("bookmarks".equals(sidebarTab) ? activeCol : inactiveCol);
-        }
-
-        int textPrimary = isDarkTheme ? 0xFFF1F3F9 : 0xFF15181E;
-        int textSecondary = isDarkTheme ? 0xFF9AA3B5 : 0xFF5D6575;
-
-        if ("thumbs".equals(sidebarTab)) {
-            if ("pdf".equals(currentKind) && !stageCanvasView.getPdfPages().isEmpty()) {
-                // Show PDF Pages + Quick Switch to Folder Files
-                TextView secTitle = new TextView(this);
-                secTitle.setText("PDF 페이지 (" + stageCanvasView.getPdfPages().size() + ")");
-                secTitle.setTextColor(textSecondary);
-                secTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-                secTitle.setTypeface(Typeface.DEFAULT_BOLD);
-                secTitle.setPadding(dp(4), dp(4), dp(4), dp(6));
-                sidebarListContainer.addView(secTitle);
-
-                List<MarkupModel.PdfPageItem> pages = stageCanvasView.getPdfPages();
-                for (int i = 0; i < pages.size(); i++) {
-                    final int pIdx = i;
-                    MarkupModel.PdfPageItem page = pages.get(i);
-                    boolean isCur = (i == stageCanvasView.getCurrentPdfPage());
-
-                    LinearLayout item = new LinearLayout(this);
-                    item.setOrientation(LinearLayout.HORIZONTAL);
-                    item.setGravity(Gravity.CENTER_VERTICAL);
-                    item.setPadding(dp(10), dp(8), dp(10), dp(8));
-                    GradientDrawable gd = new GradientDrawable();
-                    gd.setCornerRadius(dp(12));
-                    gd.setColor(isCur ? (isDarkTheme ? 0x330381FE : 0x1F0381FE) : Color.TRANSPARENT);
-                    if (isCur) gd.setStroke(dp(1), 0xFF0381FE);
-                    item.setBackground(gd);
-
-                    ImageView thumbIv = new ImageView(this);
-                    thumbIv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                    Bitmap tBmp = page.getOrRenderBaseBitmap(180);
-                    thumbIv.setImageBitmap(tBmp);
-                    item.addView(thumbIv, new LinearLayout.LayoutParams(dp(42), dp(54)));
-
-                    LinearLayout meta = new LinearLayout(this);
-                    meta.setOrientation(LinearLayout.VERTICAL);
-                    meta.setPadding(dp(10), 0, 0, 0);
-                    TextView t1 = new TextView(this);
-                    t1.setText((i + 1) + " 페이지");
-                    t1.setTextColor(textPrimary);
-                    t1.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
-                    t1.setTypeface(Typeface.DEFAULT_BOLD);
-                    TextView t2 = new TextView(this);
-                    t2.setText(Math.round(page.displayWidthPt()) + "×" + Math.round(page.displayHeightPt()) + " pt"
-                            + (page.anns.isEmpty() ? "" : " · 주석 " + page.anns.size()));
-                    t2.setTextColor(textSecondary);
-                    t2.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-                    meta.addView(t1);
-                    meta.addView(t2);
-                    item.addView(meta, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-                    item.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            stageCanvasView.setCurrentPdfPage(pIdx);
-                            if (!isTabletLayout) {
-                                sidebarVisible = false;
-                                updateDrawerAndPanelVisibility();
-                            }
-                        }
-                    });
-                    sidebarListContainer.addView(item);
-                }
+    void createBlankSketch() {
+        guardChanges(() -> {
+            try {
+                File f = new File(sampleDir, "Sketch_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".png");
+                Bitmap bmp = Bitmap.createBitmap(1600, 1200, Bitmap.Config.ARGB_8888);
+                bmp.eraseColor(Color.WHITE);
+                FileOps.saveBitmap(f.getAbsolutePath(), bmp, 100);
+                bmp.recycle();
+                openFileUnchecked(f.getAbsolutePath());
+                setTool("markup");
+            } catch (Exception e) {
+                toast("새 스케치를 만들 수 없습니다: " + e.getMessage());
             }
+        });
+    }
 
-            // Folder Files List
-            TextView folderHeader = new TextView(this);
-            folderHeader.setText("현재 폴더 파일 (" + folderItems.size() + ")");
-            folderHeader.setTextColor(textSecondary);
-            folderHeader.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-            folderHeader.setTypeface(Typeface.DEFAULT_BOLD);
-            folderHeader.setPadding(dp(4), dp(10), dp(4), dp(6));
-            sidebarListContainer.addView(folderHeader);
+    List<File> collectRecentFiles() {
+        List<File> out = new ArrayList<>();
+        File[] dirs = {inboxDir, sampleDir, new File(getFilesDir(), "captures"), new File(getFilesDir(), "backups")};
+        for (File d : dirs) {
+            if (d == null || !d.isDirectory()) continue;
+            File[] fs = d.listFiles();
+            if (fs == null) continue;
+            for (File f : fs) {
+                if (f.isFile() && !f.getName().startsWith(".") && !FileOps.kindOf(f.getName()).isEmpty()) out.add(f);
+            }
+        }
+        Collections.sort(out, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        return out;
+    }
 
-            for (int i = 0; i < folderItems.size(); i++) {
-                final FileEntry fe = folderItems.get(i);
-                boolean active = fe.path.equalsIgnoreCase(currentPath);
-
-                LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(dp(10), dp(8), dp(10), dp(8));
-                GradientDrawable gd = new GradientDrawable();
-                gd.setCornerRadius(dp(12));
-                gd.setColor(active ? (isDarkTheme ? 0x330381FE : 0x1F0381FE) : Color.TRANSPARENT);
-                if (active) gd.setStroke(dp(1), 0xFF0381FE);
-                row.setBackground(gd);
-
-                String iconName = "image".equals(fe.kind) ? "image" : "pdf".equals(fe.kind) ? "pdf" : "doc".equals(fe.kind) ? "doc" : "play";
-                ImageView iv = new ImageView(this);
-                iv.setImageDrawable(VectorIcons.create(this, iconName, 20f, active ? 0xFF0381FE : textSecondary));
-                row.addView(iv, new LinearLayout.LayoutParams(dp(24), dp(24)));
-
-                LinearLayout col = new LinearLayout(this);
-                col.setOrientation(LinearLayout.VERTICAL);
-                col.setPadding(dp(10), 0, 0, 0);
-
-                TextView nTv = new TextView(this);
-                nTv.setText(fe.name);
-                nTv.setTextColor(textPrimary);
-                nTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-                nTv.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-                nTv.setSingleLine(true);
-
-                TextView sTv = new TextView(this);
-                sTv.setText(fmtBytes(fe.size));
-                sTv.setTextColor(textSecondary);
-                sTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
-
-                col.addView(nTv);
-                col.addView(sTv);
-                row.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-                row.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        openFileAtPath(fe.path);
-                        if (!isTabletLayout) {
-                            sidebarVisible = false;
-                            updateDrawerAndPanelVisibility();
-                        }
+    private void loadFolderList(String dirPath, String selectFilePath) {
+        folderItems.clear();
+        File dir = new File(dirPath);
+        if (dir.exists() && dir.isFile()) { selectFilePath = dir.getAbsolutePath(); dir = dir.getParentFile(); }
+        if (dir != null && dir.exists() && dir.isDirectory()) {
+            File[] raw = dir.listFiles();
+            if (raw != null) {
+                for (File f : raw) {
+                    if (f.isFile() && !f.getName().startsWith(".")) {
+                        String k = FileOps.kindOf(f.getName());
+                        if (!k.isEmpty()) folderItems.add(new FileEntry(f.getAbsolutePath(), f.getName(), k, f.length(), f.lastModified()));
                     }
-                });
-                sidebarListContainer.addView(row);
-            }
-        } else if ("anns".equals(sidebarTab)) {
-            List<MarkupModel.Annotation> anns = new ArrayList<>();
-            if ("image".equals(currentKind)) {
-                anns.addAll(stageCanvasView.getImageAnnotations());
-            } else if ("pdf".equals(currentKind)) {
-                for (MarkupModel.PdfPageItem p : stageCanvasView.getPdfPages()) {
-                    anns.addAll(p.anns);
                 }
             }
-            if (anns.isEmpty()) {
-                TextView empty = new TextView(this);
-                empty.setText("추가된 주석이 없습니다.\n마크업 도구로 펜, 형광펜, 도형, 텍스트, 서명을 추가해 보세요.");
-                empty.setTextColor(textSecondary);
-                empty.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-                empty.setPadding(dp(10), dp(20), dp(10), dp(20));
-                sidebarListContainer.addView(empty);
-            } else {
-                for (final MarkupModel.Annotation a : anns) {
-                    LinearLayout r = new LinearLayout(this);
-                    r.setOrientation(LinearLayout.HORIZONTAL);
-                    r.setGravity(Gravity.CENTER_VERTICAL);
-                    r.setPadding(dp(10), dp(8), dp(10), dp(8));
+        }
+        sortFolderItems();
+        if (selectFilePath != null) openFileAtPath(selectFilePath);
+        else if (!folderItems.isEmpty()) openFileAtPath(folderItems.get(0).path);
+    }
 
-                    View dot = new View(this);
-                    GradientDrawable dgd = new GradientDrawable();
-                    dgd.setShape(GradientDrawable.OVAL);
-                    dgd.setColor(a.color);
-                    dot.setBackground(dgd);
-                    r.addView(dot, new LinearLayout.LayoutParams(dp(12), dp(12)));
-
-                    TextView tv = new TextView(this);
-                    tv.setText("  " + a.label());
-                    tv.setTextColor(textPrimary);
-                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-                    r.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-                    ImageView del = new ImageView(this);
-                    del.setImageDrawable(VectorIcons.create(this, "trash", 18f, 0xFFEF5350));
-                    del.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            if ("image".equals(currentKind)) {
-                                stageCanvasView.getImageAnnotations().remove(a);
-                            } else if ("pdf".equals(currentKind)) {
-                                for (MarkupModel.PdfPageItem p : stageCanvasView.getPdfPages()) {
-                                    p.anns.remove(a);
-                                }
-                            }
-                            stageCanvasView.invalidate();
-                            refreshSidebarContent();
-                        }
-                    });
-                    r.addView(del, new LinearLayout.LayoutParams(dp(24), dp(24)));
-                    sidebarListContainer.addView(r);
-                }
-            }
-        } else if ("bookmarks".equals(sidebarTab)) {
-            if (bookmarks.isEmpty()) {
-                TextView empty = new TextView(this);
-                empty.setText("저장된 책갈피가 없습니다.\n하단 툴바의 책갈피 아이콘을 눌러 자주 보는 파일을 등록하세요.");
-                empty.setTextColor(textSecondary);
-                empty.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-                empty.setPadding(dp(10), dp(20), dp(10), dp(20));
-                sidebarListContainer.addView(empty);
-            } else {
-                for (final String bPath : new ArrayList<>(bookmarks)) {
-                    final File bf = new File(bPath);
-                    LinearLayout r = new LinearLayout(this);
-                    r.setOrientation(LinearLayout.HORIZONTAL);
-                    r.setGravity(Gravity.CENTER_VERTICAL);
-                    r.setPadding(dp(10), dp(9), dp(10), dp(9));
-
-                    TextView tv = new TextView(this);
-                    tv.setText(bf.getName());
-                    tv.setTextColor(textPrimary);
-                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-                    tv.setSingleLine(true);
-                    tv.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            if (bf.exists()) {
-                                openFileAtPath(bPath);
-                                if (!isTabletLayout) {
-                                    sidebarVisible = false;
-                                    updateDrawerAndPanelVisibility();
-                                }
-                            } else {
-                                toast("파일을 찾을 수 없습니다");
-                            }
-                        }
-                    });
-                    r.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-                    ImageView del = new ImageView(this);
-                    del.setImageDrawable(VectorIcons.create(this, "close", 16f, textSecondary));
-                    del.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            toggleBookmark(bPath);
-                            refreshSidebarContent();
-                        }
-                    });
-                    r.addView(del, new LinearLayout.LayoutParams(dp(22), dp(22)));
-                    sidebarListContainer.addView(r);
-                }
-            }
+    private void sortFolderItems() {
+        Collections.sort(folderItems, (a, b) -> {
+            if ("date".equals(sortOrder)) return Long.compare(b.lastModified, a.lastModified);
+            if ("size".equals(sortOrder)) return Long.compare(b.size, a.size);
+            return Util.NATURAL_SORT.compare(a.name, b.name);
+        });
+        currentFileIndex = -1;
+        for (int i = 0; i < folderItems.size(); i++) {
+            if (folderItems.get(i).path.equalsIgnoreCase(currentPath)) { currentFileIndex = i; break; }
         }
     }
 
-    // ---------- Populate Info / EXIF / Histogram / AI Metadata Panel ----------
-    @SuppressWarnings("unchecked")
-    private void refreshInfoPanelContent() {
-        if (infoContentBody == null) return;
-        infoContentBody.removeAllViews();
+    private void navigateFile(int delta) {
+        if (folderItems.isEmpty()) return;
+        int nextIdx = (currentFileIndex + delta + folderItems.size()) % folderItems.size();
+        openFileAtPath(folderItems.get(nextIdx).path);
+        if (slideshowRunning) updateSlideshowView();
+    }
 
-        int textPrimary = isDarkTheme ? 0xFFF1F3F9 : 0xFF15181E;
-        int textSecondary = isDarkTheme ? 0xFF9AA3B5 : 0xFF5D6575;
-        int cardBg = isDarkTheme ? 0xFF1F2430 : 0xFFF4F6FA;
+    void chooseFolder() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        startActivityForResult(intent, REQ_OPEN_TREE);
+    }
 
-        if (currentPath.isEmpty()) {
-            TextView tv = new TextView(this);
-            tv.setText("열려 있는 파일이 없습니다.");
-            tv.setTextColor(textSecondary);
-            infoContentBody.addView(tv);
+    private void showTreeFolder(Uri tree, String parentId) {
+        bgPool.execute(() -> {
+            try {
+                List<DocumentStore.Entry> entries = documents.children(tree, parentId);
+                List<String> labels = new ArrayList<>();
+                for (DocumentStore.Entry entry : entries) labels.add((entry.directory ? "폴더 · " : "") + entry.name);
+                mainHandler.post(() -> new AlertDialog.Builder(this).setTitle("선택한 폴더")
+                        .setItems(labels.toArray(new String[0]), (d, w) -> {
+                            DocumentStore.Entry chosen = entries.get(w);
+                            if (chosen.directory) { showTreeFolder(tree, DocumentsContract.getDocumentId(chosen.uri)); return; }
+                            guardChanges(() -> {
+                                try {
+                                    folderItems.clear();
+                                    String selected = "";
+                                    for (DocumentStore.Entry entry : entries) {
+                                        if (!entry.directory) {
+                                            String path = documents.register(entry.uri, entry.name);
+                                            folderItems.add(new FileEntry(path, entry.name, FileOps.kindOf(entry.name), entry.size, entry.modified));
+                                            if (entry == chosen) selected = path;
+                                        }
+                                    }
+                                    sortFolderItems();
+                                    openFileAtPath(selected);
+                                } catch (Exception e) { toast(e.getMessage()); }
+                            });
+                        }).setNegativeButton("닫기", null).setNeutralButton("폴더 다시 선택", (d, w) -> chooseFolder()).show());
+            } catch (Exception e) { toast("폴더를 열 수 없습니다: " + e.getMessage()); }
+        });
+    }
+
+    void launchSystemFilePicker() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            intent.setType("*/*");
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            startActivityForResult(intent, REQ_OPEN_DOC);
+        } catch (Exception e) { toast("파일 선택기를 열 수 없습니다: " + e.getMessage()); }
+    }
+
+    private void launchInsertPagePicker() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            startActivityForResult(intent, REQ_INSERT_PAGE_DOC);
+        } catch (Exception e) { toast("파일 선택기를 열 수 없습니다: " + e.getMessage()); }
+    }
+
+    void launchScreenCapture() {
+        if (capturePending) return;
+        guardChanges(() -> {
+            try {
+                MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                capturePending = true;
+                startActivityForResult(manager.createScreenCaptureIntent(), REQ_CAPTURE);
+            } catch (Exception e) {
+                capturePending = false;
+                toast("화면 캡처를 시작할 수 없습니다.");
+            }
+        });
+    }
+
+    private void consumeCapture() {
+        String path = prefs.getString(ScreenCaptureService.RESULT_PATH, "");
+        if (path.isEmpty()) return;
+        prefs.edit().remove(ScreenCaptureService.RESULT_PATH).apply();
+        capturePending = false;
+        if (new File(path).isFile()) openFileAtPath(path);
+    }
+
+    void launchCameraCapture() {
+        try {
+            pendingCameraFile = new File(sampleDir, "Camera_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".jpg");
+            Uri uri = ViewerFileProvider.getUriForFile(this, pendingCameraFile);
+            Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(intent, REQ_CAMERA);
+        } catch (Exception e) { toast("카메라를 실행할 수 없습니다: " + e.getMessage()); }
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_CAPTURE) {
+            if (resultCode != Activity.RESULT_OK || data == null) { capturePending = false; return; }
+            Intent capture = new Intent(this, ScreenCaptureService.class)
+                    .putExtra(ScreenCaptureService.DATA, data)
+                    .putExtra(ScreenCaptureService.RECEIVER, new ResultReceiver(mainHandler) {
+                        @Override protected void onReceiveResult(int code, Bundle result) {
+                            capturePending = false;
+                            if (isDestroyed() || isFinishing()) return;
+                            if (code == Activity.RESULT_OK) { if (activityResumed) consumeCapture(); }
+                            else toast(result.getString("error", "화면 캡처를 완료하지 못했습니다."));
+                        }
+                    });
+            try { startForegroundService(capture); }
+            catch (Exception e) { capturePending = false; toast("화면 캡처를 시작하지 못했습니다."); }
             return;
         }
-
-        Map<String, Object> info = FileOps.info(currentPath);
-
-        // 1. Live RGB/Luma Histogram Card (for Images)
-        if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
-            addInfoSectionHeader("히스토그램 (RGB / 밝기)", textSecondary);
-            final Bitmap bmp = stageCanvasView.getImageBitmap();
-            View histView = new View(this) {
-                private int[] rHist, gHist, bHist;
-                private int maxCount = 1;
-                private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-                {
-                    computeHistogram();
-                }
-
-                private void computeHistogram() {
-                    rHist = new int[256];
-                    gHist = new int[256];
-                    bHist = new int[256];
+        if (resultCode != Activity.RESULT_OK) return;
+        if (requestCode == REQ_OPEN_TREE && data != null && data.getData() != null) {
+            documents.retain(data.getData(), data.getFlags());
+            showTreeFolder(data.getData(), DocumentsContract.getTreeDocumentId(data.getData()));
+            return;
+        }
+        if (requestCode == REQ_OPEN_DOC && data != null) { handleIncomingIntent(data); return; }
+        if (requestCode == REQ_CAMERA) {
+            if (pendingCameraFile != null && pendingCameraFile.exists() && pendingCameraFile.length() > 0) {
+                loadFolderList(sampleDir.getAbsolutePath(), pendingCameraFile.getAbsolutePath());
+            }
+        } else if (requestCode == REQ_CREATE_DOC && data != null && data.getData() != null) {
+            if (pendingExportBytes == null && pendingExportFile != null) {
+                try { pendingExportBytes = Util.readAllBytes(pendingExportFile); } catch (Exception e) { toast("저장할 파일을 다시 준비해 주세요."); }
+            }
+            if (pendingExportBytes != null) {
+                try (OutputStream os = getContentResolver().openOutputStream(data.getData(), "wt")) {
+                    if (os != null) { os.write(pendingExportBytes); os.flush(); toast("선택한 위치에 저장했습니다"); }
+                } catch (Exception e) { toast("저장 실패: " + e.getMessage()); }
+                finally { pendingExportBytes = null; }
+            }
+        } else if (requestCode == REQ_INSERT_PAGE_DOC && data != null && data.getData() != null) {
+            File f = copyContentUriToInbox(data.getData());
+            if (f != null && "pdf".equals(currentKind)) {
+                String k = FileOps.kindOf(f.getName());
+                List<MarkupModel.PdfPageItem> pList = stageCanvasView.getPdfPages();
+                int insertAt = Math.min(pList.size(), stageCanvasView.getCurrentPdfPage() + 1);
+                if ("pdf".equals(k)) {
+                    PdfHost.open(f.getAbsolutePath(), "");
+                    int cnt = PdfHost.getPageCount(f.getAbsolutePath());
+                    for (int i = 0; i < cnt; i++) {
+                        float[] sz = PdfHost.getPageSizePt(f.getAbsolutePath(), i);
+                        pList.add(insertAt + i, new MarkupModel.PdfPageItem("ins_" + System.currentTimeMillis() + "_" + i, "pdf", f.getAbsolutePath(), i, sz[0], sz[1]));
+                    }
+                    markModified();
+                    stageCanvasView.setCurrentPdfPage(insertAt);
+                    syncChromeState();
+                    toast(cnt + "개의 PDF 페이지를 삽입했습니다");
+                } else if ("image".equals(k)) {
                     try {
-                        Bitmap small = Bitmap.createScaledBitmap(bmp, Math.min(160, bmp.getWidth()), Math.min(160, bmp.getHeight()), false);
-                        int w = small.getWidth(), h = small.getHeight();
-                        int[] px = new int[w * h];
-                        small.getPixels(px, 0, w, 0, 0, w, h);
-                        for (int c : px) {
-                            if (((c >>> 24) & 0xFF) < 16) continue;
-                            rHist[(c >> 16) & 0xFF]++;
-                            gHist[(c >> 8) & 0xFF]++;
-                            bHist[c & 0xFF]++;
+                        Bitmap bmp = ImageEditOps.decodeOriginal(f.getAbsolutePath());
+                        if (bmp != null) {
+                            float wPt = 595f, hPt = Math.max(200f, 595f * ((float) bmp.getHeight() / Math.max(1, bmp.getWidth())));
+                            MarkupModel.PdfPageItem imgPage = new MarkupModel.PdfPageItem("img_" + System.currentTimeMillis(), "img", f.getAbsolutePath(), 0, wPt, hPt);
+                            imgPage.customBitmap = bmp;
+                            pList.add(insertAt, imgPage);
+                            markModified();
+                            stageCanvasView.setCurrentPdfPage(insertAt);
+                            syncChromeState();
+                            toast("이미지 페이지를 삽입했습니다");
                         }
-                        for (int i = 4; i < 252; i++) {
-                            maxCount = Math.max(maxCount, Math.max(rHist[i], Math.max(gHist[i], bHist[i])));
-                        }
-                        if (small != bmp) small.recycle();
-                    } catch (Exception ignored) {}
-                }
-
-                @Override
-                protected void onDraw(Canvas canvas) {
-                    super.onDraw(canvas);
-                    float w = getWidth(), h = getHeight();
-                    p.setStyle(Paint.Style.STROKE);
-                    p.setStrokeWidth(dp(1.5f));
-                    drawChannel(canvas, rHist, 0xCCEF5350, w, h);
-                    drawChannel(canvas, gHist, 0xCC66BB6A, w, h);
-                    drawChannel(canvas, bHist, 0xCC42A5F5, w, h);
-                }
-
-                private void drawChannel(Canvas canvas, int[] hist, int color, float w, float h) {
-                    if (hist == null) return;
-                    p.setColor(color);
-                    Path path = new Path();
-                    for (int i = 0; i < 256; i++) {
-                        float x = (i / 255f) * w;
-                        float ratio = Math.min(1f, (float) hist[i] / Math.max(1, maxCount));
-                        float y = h - ratio * (h - dp(8)) - dp(4);
-                        if (i == 0) path.moveTo(x, y);
-                        else path.lineTo(x, y);
-                    }
-                    canvas.drawPath(path, p);
-                }
-            };
-            GradientDrawable hBg = new GradientDrawable();
-            hBg.setColor(cardBg);
-            hBg.setCornerRadius(dp(14));
-            histView.setBackground(hBg);
-            LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96));
-            hlp.bottomMargin = dp(12);
-            infoContentBody.addView(histView, hlp);
-        }
-
-        // 2. Basic File Info
-        addInfoSectionHeader("기본 정보", textSecondary);
-        addInfoRow("파일 이름", String.valueOf(info.get("name")), textPrimary, textSecondary);
-        addInfoRow("형식", String.valueOf(info.get("ext")), textPrimary, textSecondary);
-        addInfoRow("파일 크기", fmtBytes(Util.toLong(info.get("size"), 0)), textPrimary, textSecondary);
-        addInfoRow("수정일", String.valueOf(info.get("modified")), textPrimary, textSecondary);
-        addInfoRow("경로", String.valueOf(info.get("path")), textPrimary, textSecondary);
-
-        if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
-            Bitmap b = stageCanvasView.getImageBitmap();
-            addInfoRow("해상도", b.getWidth() + " × " + b.getHeight() + " px", textPrimary, textSecondary);
-        } else if ("pdf".equals(currentKind)) {
-            addInfoRow("총 페이지 수", stageCanvasView.getPdfPages().size() + " 페이지", textPrimary, textSecondary);
-        }
-
-        // 3. EXIF Camera Info
-        String[] exifKeys = {"camera", "lens", "taken", "exposure", "aperture", "focal", "iso", "software", "gps"};
-        String[] exifLabels = {"카메라", "렌즈", "촬영 일시", "노출 시간", "조리개", "초점 거리", "ISO 감도", "소프트웨어", "GPS 좌표"};
-        boolean hasExif = false;
-        for (String k : exifKeys) {
-            if (info.get(k) != null) { hasExif = true; break; }
-        }
-        if (hasExif) {
-            addInfoSectionHeader("EXIF 촬영 정보", textSecondary);
-            for (int i = 0; i < exifKeys.length; i++) {
-                Object val = info.get(exifKeys[i]);
-                if (val != null) {
-                    addInfoRow(exifLabels[i], String.valueOf(val), textPrimary, textSecondary);
-                }
-            }
-        }
-
-        // 4. AI Generation Metadata (Stable Diffusion / ComfyUI / NovelAI / Midjourney)
-        Object metaObj = info.get("meta");
-        if (metaObj instanceof List) {
-            AiMeta.ParsedAi ai = AiMeta.parseAiMeta((List<Object>) metaObj);
-            if (ai != null) {
-                addInfoSectionHeader("AI 생성 정보 (" + (ai.tool.isEmpty() ? "AI 메타데이터" : ai.tool) + ")", textSecondary);
-
-                if (!ai.prompt.isEmpty()) {
-                    addCopyableAiBlock("프롬프트 (Prompt)", ai.prompt, cardBg, textPrimary, textSecondary);
-                }
-                if (!ai.negative.isEmpty()) {
-                    addCopyableAiBlock("네거티브 프롬프트 (Negative)", ai.negative, cardBg, textPrimary, textSecondary);
-                }
-                if (!ai.settings.isEmpty()) {
-                    for (Map.Entry<String, String> e : ai.settings.entrySet()) {
-                        addInfoRow(e.getKey(), e.getValue(), textPrimary, textSecondary);
-                    }
+                    } catch (Exception e) { toast(e.getMessage()); }
                 }
             }
         }
     }
 
-    private void addInfoSectionHeader(String title, int color) {
-        TextView tv = new TextView(this);
-        tv.setText(title);
-        tv.setTextColor(color);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setPadding(0, dp(10), 0, dp(6));
-        infoContentBody.addView(tv);
-    }
-
-    private void addInfoRow(String label, String value, int textPrimary, int textSecondary) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(0, dp(4), 0, dp(4));
-
-        TextView k = new TextView(this);
-        k.setText(label);
-        k.setTextColor(textSecondary);
-        k.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        row.addView(k, new LinearLayout.LayoutParams(dp(88), ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        TextView v = new TextView(this);
-        v.setText(value);
-        v.setTextColor(textPrimary);
-        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        v.setTextIsSelectable(true);
-        row.addView(v, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        infoContentBody.addView(row);
-    }
-
-    private void addCopyableAiBlock(String title, final String content, int cardBg, int textPrimary, int textSecondary) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(10);
-        box.setPadding(pad, pad, pad, pad);
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(cardBg);
-        gd.setCornerRadius(dp(12));
-        box.setBackground(gd);
-
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-
-        TextView lb = new TextView(this);
-        lb.setText(title);
-        lb.setTextColor(textSecondary);
-        lb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        lb.setTypeface(Typeface.DEFAULT_BOLD);
-        top.addView(lb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        top.addView(createSmallActionChip("복사", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                copyToClipboard(content);
-                toast("클립보드에 복사했습니다");
-            }
-        }));
-        box.addView(top);
-
-        TextView body = new TextView(this);
-        body.setText(content);
-        body.setTextColor(textPrimary);
-        body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        body.setTypeface(Typeface.MONOSPACE);
-        body.setPadding(0, dp(6), 0, 0);
-        body.setTextIsSelectable(true);
-        box.addView(body);
-
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(8);
-        infoContentBody.addView(box, lp);
-    }
-
-    // ---------- Image Editing Operations & Undo/Redo ----------
+    // ---- Image / PDF Edits & Undo/Redo ----
     private void markModified() { isModified = true; if ("pdf".equals(currentKind)) recordPdfState(); }
+
     private String pdfKey() {
         StringBuilder key = new StringBuilder();
         for (MarkupModel.PdfPageItem p : stageCanvasView.getPdfPages()) {
             key.append(p.uid).append(':').append(p.rot).append('|');
-            for (MarkupModel.Annotation a : p.anns) { key.append(a.id).append(a.type).append(a.color).append(a.strokeWidth).append(a.fontSize).append(a.fillSolid).append(a.x).append(a.y).append(a.w).append(a.h).append(a.x2).append(a.y2).append(a.text); for (float[] point : a.points) key.append(point[0]).append(',').append(point[1]).append(';'); }
+            for (MarkupModel.Annotation a : p.anns) {
+                key.append(a.id).append(a.type).append(a.color).append(a.strokeWidth).append(a.x).append(a.y).append(a.text);
+            }
         }
         return key.toString();
     }
+
     private List<MarkupModel.PdfPageItem> copyPdfState() {
         List<MarkupModel.PdfPageItem> copy = new ArrayList<>();
         for (MarkupModel.PdfPageItem page : stageCanvasView.getPdfPages()) {
             MarkupModel.PdfPageItem p = new MarkupModel.PdfPageItem(page.uid, page.kind, page.srcPath, page.srcPageIdx, page.wPt, page.hPt);
-            p.rot = page.rot; p.customBitmap = page.customBitmap; p.anns.addAll(MarkupModel.copyList(page.anns)); copy.add(p);
+            p.rot = page.rot; p.customBitmap = page.customBitmap; p.anns.addAll(MarkupModel.copyList(page.anns));
+            copy.add(p);
         }
         return copy;
     }
+
     private void recordPdfState() {
-        String key = pdfKey(); if (key.equals(lastPdfKey)) return;
-        lastPdfKey = key; pdfUndo.add(copyPdfState()); pdfRedo.clear(); if (pdfUndo.size() > 30) pdfUndo.remove(0);
+        String key = pdfKey();
+        if (key.equals(lastPdfKey)) return;
+        lastPdfKey = key;
+        pdfUndo.add(copyPdfState());
+        pdfRedo.clear();
+        if (pdfUndo.size() > 30) pdfUndo.remove(0);
     }
+
     private void undoPdf(boolean redo) {
         if (!"pdf".equals(currentKind)) return;
         if (redo) { if (pdfRedo.isEmpty()) return; pdfUndo.add(pdfRedo.remove(pdfRedo.size() - 1)); }
         else { if (pdfUndo.size() < 2) return; pdfRedo.add(pdfUndo.remove(pdfUndo.size() - 1)); }
         List<MarkupModel.PdfPageItem> state = pdfUndo.get(pdfUndo.size() - 1);
         stageCanvasView.setPdfContent(new ArrayList<>(state), stageCanvasView.getPdfViewMode(), Math.min(stageCanvasView.getCurrentPdfPage(), state.size() - 1));
-        List<MarkupModel.PdfPageItem> detached = copyPdfState(); stageCanvasView.setPdfContent(detached, stageCanvasView.getPdfViewMode(), stageCanvasView.getCurrentPdfPage());
-        lastPdfKey = pdfKey(); isModified = true; updateHeaderTitles(); refreshSidebarContent();
+        stageCanvasView.setPdfContent(copyPdfState(), stageCanvasView.getPdfViewMode(), stageCanvasView.getCurrentPdfPage());
+        lastPdfKey = pdfKey();
+        isModified = true;
+        syncChromeState();
     }
+
     private void pushImageUndo() {
         if (stageCanvasView.getImageBitmap() == null) return;
         imgUndoStack.add(new ImageSnapshot(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations()));
-        long historyBytes=0,budget=Math.max(32L*1024*1024,Runtime.getRuntime().maxMemory()/4);
-        for(ImageSnapshot snapshot:imgUndoStack)if(snapshot.bmp!=null)historyBytes+=snapshot.bmp.getAllocationByteCount();
-        while(imgUndoStack.size()>1 && (imgUndoStack.size()>15 || historyBytes>budget)){ImageSnapshot old=imgUndoStack.remove(0);if(old.bmp!=null)historyBytes-=old.bmp.getAllocationByteCount();}
+        long bytes = 0, budget = Math.max(32L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 4);
+        for (ImageSnapshot s : imgUndoStack) if (s.bmp != null) bytes += s.bmp.getAllocationByteCount();
+        while (imgUndoStack.size() > 1 && (imgUndoStack.size() > 15 || bytes > budget)) {
+            ImageSnapshot old = imgUndoStack.remove(0);
+            if (old.bmp != null) bytes -= old.bmp.getAllocationByteCount();
+        }
         imgRedoStack.clear();
     }
 
-    private void undoImageEdit() {
-        if (imgUndoStack.isEmpty()) {
-            toast("실행 취소할 내역이 없습니다");
-            return;
-        }
+    void undoImageEdit() {
+        if (imgUndoStack.isEmpty()) { toast("실행 취소할 내역이 없습니다"); return; }
         imgRedoStack.add(new ImageSnapshot(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations()));
         ImageSnapshot prev = imgUndoStack.remove(imgUndoStack.size() - 1);
         stageCanvasView.setImageContent(prev.bmp, null, prev.anns, false);
         markModified();
-        updateHeaderTitles();
-        updateStatusBar();
+        syncChromeState();
     }
 
-    private void redoImageEdit() {
-        if (imgRedoStack.isEmpty()) {
-            toast("다시 실행할 내역이 없습니다");
-            return;
-        }
+    void redoImageEdit() {
+        if (imgRedoStack.isEmpty()) { toast("다시 실행할 내역이 없습니다"); return; }
         imgUndoStack.add(new ImageSnapshot(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations()));
         ImageSnapshot next = imgRedoStack.remove(imgRedoStack.size() - 1);
         stageCanvasView.setImageContent(next.bmp, null, next.anns, false);
         markModified();
-        updateHeaderTitles();
-        updateStatusBar();
+        syncChromeState();
     }
 
-    private void rotateCurrentImage(int deg) {
+    void rotateCurrentImage(int deg) {
         if (stageCanvasView.getImageBitmap() == null) return;
         pushImageUndo();
         Bitmap rotated = ImageEditOps.rotate(stageCanvasView.getImageBitmap(), deg);
         stageCanvasView.setImageContent(rotated, null, stageCanvasView.getImageAnnotations(), true);
         markModified();
-        updateHeaderTitles();
-        updateStatusBar();
+        syncChromeState();
     }
 
     private void flipCurrentImage(boolean h, boolean v) {
@@ -2730,28 +1953,23 @@ public class MainActivity extends Activity {
         Bitmap flipped = ImageEditOps.flip(stageCanvasView.getImageBitmap(), h, v);
         stageCanvasView.setImageContent(flipped, null, stageCanvasView.getImageAnnotations(), false);
         markModified();
-        updateHeaderTitles();
+        syncChromeState();
     }
 
     private void updateLiveAdjustPreview() {
-        stageCanvasView.setLiveColorFilter(
-                ImageEditOps.buildColorFilter(adjExp, adjCon, adjSat, adjWarm, adjSepia, adjInvert)
-        );
+        stageCanvasView.setLiveColorFilter(ImageEditOps.buildColorFilter(adjExp, adjCon, adjSat, adjWarm, adjSepia, adjInvert));
     }
 
     private void resetColorAdjustments() {
-        adjExp = 0f; adjCon = 0f; adjSat = 0f; adjWarm = 0f; adjSharp = 0f;
-        adjSepia = false; adjInvert = false;
+        adjExp = adjCon = adjSat = adjWarm = adjSharp = 0f;
+        adjSepia = adjInvert = false;
         stageCanvasView.setLiveColorFilter(null);
     }
 
     private void commitColorAdjustments() {
         if (stageCanvasView.getImageBitmap() == null) return;
         pushImageUndo();
-        Bitmap adjusted = ImageEditOps.applyAdjust(
-                stageCanvasView.getImageBitmap(),
-                adjExp, adjCon, adjSat, adjWarm, adjSharp, adjSepia, adjInvert
-        );
+        Bitmap adjusted = ImageEditOps.applyAdjust(stageCanvasView.getImageBitmap(), adjExp, adjCon, adjSat, adjWarm, adjSharp, adjSepia, adjInvert);
         resetColorAdjustments();
         stageCanvasView.setImageContent(adjusted, null, stageCanvasView.getImageAnnotations(), false);
         markModified();
@@ -2765,245 +1983,106 @@ public class MainActivity extends Activity {
         Bitmap res = ImageEditOps.floodAlpha(stageCanvasView.getImageBitmap(), imgX, imgY, alphaTolerance, alphaContiguous);
         stageCanvasView.setImageContent(res, null, stageCanvasView.getImageAnnotations(), false);
         markModified();
-        toast("선택한 색상의 배경을 투명하게 제거했습니다");
+        toast("배경을 투명하게 제거했습니다");
     }
 
-    // ---------- PDF Page Operations ----------
     private void rotateCurrentPdfPage(int deltaDeg) {
-        List<MarkupModel.PdfPageItem> pages = stageCanvasView.getPdfPages();
+        List<MarkupModel.PdfPageItem> pList = stageCanvasView.getPdfPages();
         int idx = stageCanvasView.getCurrentPdfPage();
-        if (idx < 0 || idx >= pages.size()) return;
-        MarkupModel.PdfPageItem p = pages.get(idx);
+        if (idx < 0 || idx >= pList.size()) return;
+        MarkupModel.PdfPageItem p = pList.get(idx);
         p.rot = ((p.rot + deltaDeg) % 360 + 360) % 360;
         p.invalidateCache();
         markModified();
         stageCanvasView.fitToWindow();
-        if (sidebarVisible) refreshSidebarContent();
+        syncChromeState();
     }
 
     private void insertBlankPdfPage() {
-        List<MarkupModel.PdfPageItem> pages = stageCanvasView.getPdfPages();
+        List<MarkupModel.PdfPageItem> pList = stageCanvasView.getPdfPages();
         int idx = stageCanvasView.getCurrentPdfPage();
         float w = 595f, h = 842f;
-        if (idx >= 0 && idx < pages.size()) {
-            w = pages.get(idx).wPt;
-            h = pages.get(idx).hPt;
-        }
-        MarkupModel.PdfPageItem blank = new MarkupModel.PdfPageItem(
-                "blank_" + System.currentTimeMillis(), "blank", "", 0, w, h
-        );
-        int insertAt = Math.min(pages.size(), idx + 1);
-        pages.add(insertAt, blank);
+        if (idx >= 0 && idx < pList.size()) { w = pList.get(idx).wPt; h = pList.get(idx).hPt; }
+        MarkupModel.PdfPageItem blank = new MarkupModel.PdfPageItem("blank_" + System.currentTimeMillis(), "blank", "", 0, w, h);
+        int insertAt = Math.min(pList.size(), idx + 1);
+        pList.add(insertAt, blank);
         markModified();
         stageCanvasView.setCurrentPdfPage(insertAt);
-        refreshToolbars();
-        if (sidebarVisible) refreshSidebarContent();
+        syncChromeState();
         toast("빈 페이지를 추가했습니다");
     }
 
-    // ---------- Dialogs (Pure Native One UI Dialogs) ----------
-
-    // 1. Built-in One UI File & MediaStore Browser Dialog (Non-Rooted Compatible)
-    private void launchScreenCapture() {
-        if(capturePending)return;
-        guardChanges(() -> {
-            try {
-                android.media.projection.MediaProjectionManager manager=(android.media.projection.MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
-                capturePending=true;startActivityForResult(manager.createScreenCaptureIntent(),REQ_CAPTURE);
-            }catch(Exception e){capturePending=false;toast("화면 캡처를 시작할 수 없습니다.");}
-        });
-    }
-    private void consumeCapture() {
-        String path=prefs.getString(ScreenCaptureService.RESULT_PATH,"");if(path.isEmpty())return;
-        prefs.edit().remove(ScreenCaptureService.RESULT_PATH).apply();capturePending=false;
-        if(new File(path).isFile())openFileAtPath(path);
-    }
-    private void launchSystemFilePicker() {
-        try {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-            intent.setType("*/*");
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            startActivityForResult(intent, REQ_OPEN_DOC);
-        } catch (Exception e) {
-            toast("파일 선택기를 열 수 없습니다: " + e.getMessage());
-        }
-    }
-
-    private void launchCameraCapture() {
-        try {
-            pendingCameraFile = new File(sampleDir, "Camera_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".jpg");
-            Uri uri = ViewerFileProvider.getUriForFile(this, pendingCameraFile);
-            Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-            intent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
-            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivityForResult(intent, REQ_CAMERA);
-        } catch (Exception e) {
-            toast("카메라를 실행할 수 없습니다: " + e.getMessage());
-        }
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if(requestCode==REQ_CAPTURE) {
-            if(resultCode!=Activity.RESULT_OK || data==null){capturePending=false;return;}
-            Intent capture=new Intent(this,ScreenCaptureService.class).putExtra(ScreenCaptureService.DATA,data).putExtra(ScreenCaptureService.RECEIVER,new android.os.ResultReceiver(mainHandler){
-                @Override protected void onReceiveResult(int code,Bundle result){capturePending=false;if(isDestroyed() || isFinishing())return;if(code==Activity.RESULT_OK){if(activityResumed)consumeCapture();}else toast(result.getString("error","화면 캡처를 완료하지 못했습니다."));}
-            });
-            try{startForegroundService(capture);}catch(Exception e){capturePending=false;toast("화면 캡처를 시작하지 못했습니다.");}
-            return;
-        }
-        if (resultCode != Activity.RESULT_OK) return;
-        if (requestCode == REQ_OPEN_TREE && data != null && data.getData() != null) {
-            documents.retain(data.getData(), data.getFlags());
-            showTreeFolder(data.getData(), android.provider.DocumentsContract.getTreeDocumentId(data.getData())); return;
-        }
-        if (requestCode == REQ_OPEN_DOC && data != null) { handleIncomingIntent(data); return; }
-
-        if (requestCode == REQ_CAMERA) {
-            if (pendingCameraFile != null && pendingCameraFile.exists() && pendingCameraFile.length() > 0) {
-                loadFolderList(sampleDir.getAbsolutePath(), pendingCameraFile.getAbsolutePath());
-            }
-        } else if (requestCode == REQ_CREATE_DOC && data != null && data.getData() != null) {
-            if (pendingExportBytes == null && pendingExportFile != null) try { pendingExportBytes = Util.readAllBytes(pendingExportFile); } catch (Exception e) { toast("저장할 파일을 다시 준비해 주세요."); }
-            if (pendingExportBytes != null) {
-                try {
-                    OutputStream os = getContentResolver().openOutputStream(data.getData(), "wt");
-                    if (os != null) {
-                        try {
-                            os.write(pendingExportBytes);
-                            os.flush();
-                        } finally {
-                            os.close();
-                        }
-                        toast("선택한 위치에 저장했습니다");
-                    }
-                } catch (Exception e) {
-                    toast("저장 실패: " + e.getMessage());
-                } finally {
-                    pendingExportBytes = null;
-                }
-            }
-        } else if (requestCode == REQ_INSERT_PAGE_DOC && data != null && data.getData() != null) {
-            File f = copyContentUriToInbox(data.getData());
-            if (f != null && "pdf".equals(currentKind)) {
-                String k = FileOps.kindOf(f.getName());
-                List<MarkupModel.PdfPageItem> pages = stageCanvasView.getPdfPages();
-                int insertAt = Math.min(pages.size(), stageCanvasView.getCurrentPdfPage() + 1);
-                if ("pdf".equals(k)) {
-                    PdfHost.open(f.getAbsolutePath(), "");
-                    int cnt = PdfHost.getPageCount(f.getAbsolutePath());
-                    for (int i = 0; i < cnt; i++) {
-                        float[] sz = PdfHost.getPageSizePt(f.getAbsolutePath(), i);
-                        pages.add(insertAt + i, new MarkupModel.PdfPageItem("ins_" + System.currentTimeMillis() + "_" + i, "pdf", f.getAbsolutePath(), i, sz[0], sz[1]));
-                    }
-                    markModified();
-                    stageCanvasView.setCurrentPdfPage(insertAt);
-                    if (sidebarVisible) refreshSidebarContent();
-                    toast(cnt + "개의 PDF 페이지를 삽입했습니다");
-                } else if ("image".equals(k)) {
-                    Bitmap bmp;
-                    try{bmp=ImageEditOps.decodeOriginal(f.getAbsolutePath());}catch(java.io.IOException error){toast(error.getMessage());return;}
-                    if (bmp != null) {
-                        float wPt = 595f;
-                        float hPt = Math.max(200f, 595f * ((float) bmp.getHeight() / Math.max(1, bmp.getWidth())));
-                        MarkupModel.PdfPageItem imgPage = new MarkupModel.PdfPageItem("img_" + System.currentTimeMillis(), "img", f.getAbsolutePath(), 0, wPt, hPt);
-                        imgPage.customBitmap = bmp;
-                        pages.add(insertAt, imgPage);
-                        markModified();
-                        stageCanvasView.setCurrentPdfPage(insertAt);
-                        if (sidebarVisible) refreshSidebarContent();
-                        toast("이미지 페이지를 삽입했습니다");
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Save & Export Dialogs
-    private void saveCurrentFile(boolean saveAsSystemPicker) {
+    // ---- Save / Export / Print / Share ----
+    void saveCurrentFile(boolean saveAsSystemPicker) {
         if (currentPath.isEmpty() || saveRunning) return;
         if (!saveAsSystemPicker && isModified && "pdf".equals(currentKind) && !flattenedPdfApproved) {
-            new AlertDialog.Builder(this).setTitle("편집한 PDF 저장").setMessage("페이지를 이미지로 저장해요. 텍스트 선택·링크·양식은 유지되지 않으며, 기존 파일은 앱의 백업 폴더에 보관해요.")
-                .setNegativeButton("취소", (d,w) -> cancelAfterSave()).setOnCancelListener(d -> cancelAfterSave()).setPositiveButton("저장", (d,w) -> { flattenedPdfApproved = true; saveCurrentFile(false); }).show(); return;
+            new AlertDialog.Builder(this).setTitle("편집한 PDF 저장")
+                    .setMessage("페이지를 이미지로 저장해요. 기존 파일은 앱의 백업 폴더에 보관해요.")
+                    .setNegativeButton("취소", (d, w) -> cancelAfterSave())
+                    .setOnCancelListener(d -> cancelAfterSave())
+                    .setPositiveButton("저장", (d, w) -> { flattenedPdfApproved = true; saveCurrentFile(false); })
+                    .show();
+            return;
         }
-        final String path = currentPath, kind = currentKind; final boolean saveCopy = saveAsSystemPicker;
-        final android.app.ProgressDialog progress = android.app.ProgressDialog.show(this, "저장", "파일을 준비하고 있어요…", true, false);
+        final String path = currentPath, kind = currentKind;
+        final boolean saveCopy = saveAsSystemPicker;
+        final ProgressDialog progress = ProgressDialog.show(this, "저장", "파일을 준비하고 있어요…", true, false);
         saveRunning = true;
         bgPool.execute(() -> {
             try {
                 File prepared = ViewerExports.snapshot(this, path, kind, stageCanvasView, nativeDocView, exportQuality, exportDpi, isModified);
                 boolean needsPicker = saveCopy || !Util.extOf(prepared.getName()).equals(Util.extOf(path));
                 if (!needsPicker) {
-                    File backupDir = new File(getFilesDir(), "backups"); backupDir.mkdirs();
-                    java.nio.file.Files.copy(new File(path).toPath(), new File(backupDir, System.currentTimeMillis() + "_" + new File(path).getName()).toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    File backupDir = new File(getFilesDir(), "backups");
+                    backupDir.mkdirs();
+                    Files.copy(new File(path).toPath(), new File(backupDir, System.currentTimeMillis() + "_" + new File(path).getName()).toPath(), StandardCopyOption.REPLACE_EXISTING);
                     File replacement = new File(path + ".save");
-                    java.nio.file.Files.copy(prepared.toPath(), replacement.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    java.nio.file.Files.move(replacement.toPath(), new File(path).toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    Files.copy(prepared.toPath(), replacement.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                    Files.move(replacement.toPath(), new File(path).toPath(), StandardCopyOption.REPLACE_EXISTING);
                     documents.publish(path);
                 }
                 final boolean picker = needsPicker;
                 final byte[] bytes = picker ? Util.readAllBytes(prepared) : null;
                 mainHandler.post(() -> {
-                    saveRunning = false; progress.dismiss();
+                    saveRunning = false;
+                    progress.dismiss();
                     if (isFinishing()) return;
                     if (picker) { cancelAfterSave(); promptSystemSavePicker(prepared.getName(), bytes); return; }
-                    isModified = false; if ("doc".equals(kind)) nativeDocView.markSaved();
-                    scanMediaFile(path); updateHeaderTitles(); toast("저장했습니다");
-                    Runnable next = afterSave; afterSave = afterSaveCancelled = null; if (next != null) next.run();
+                    isModified = false;
+                    if ("doc".equals(kind)) nativeDocView.markSaved();
+                    scanMediaFile(path);
+                    syncChromeState();
+                    toast("저장했습니다");
+                    Runnable next = afterSave;
+                    afterSave = afterSaveCancelled = null;
+                    if (next != null) next.run();
                 });
-            } catch (Exception|OutOfMemoryError e) {
-                mainHandler.post(() -> { saveRunning = false; cancelAfterSave(); progress.dismiss(); toast(e instanceof OutOfMemoryError?"원본 해상도로 저장할 메모리가 부족합니다. 다른 앱을 닫고 다시 저장해 주세요.":"저장 실패: " + e.getMessage() + " · 다른 이름으로 저장할 수 있어요."); });
+            } catch (Exception | OutOfMemoryError e) {
+                mainHandler.post(() -> {
+                    saveRunning = false; cancelAfterSave(); progress.dismiss();
+                    toast(e instanceof OutOfMemoryError ? "메모리가 부족합니다." : "저장 실패: " + e.getMessage());
+                });
             }
         });
     }
+
     private void promptSystemSavePicker(String defaultName, byte[] bytes) {
         try {
             pendingExportBytes = bytes;
-            pendingExportFile = new File(getCacheDir(), "pending-export.bin"); Util.writeAllBytes(pendingExportFile, bytes);
+            pendingExportFile = new File(getCacheDir(), "pending-export.bin");
+            Util.writeAllBytes(pendingExportFile, bytes);
             Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType(FileOps.mimeOf(Util.extOf(defaultName)));
+            intent.setType(FileOps.mimeOf(Util.extOf(defaultName)));
             intent.putExtra(Intent.EXTRA_TITLE, defaultName);
             startActivityForResult(intent, REQ_CREATE_DOC);
-        } catch (Exception e) {
-            toast("시스템 저장 창을 열 수 없습니다: " + e.getMessage());
-        }
+        } catch (Exception e) { toast("시스템 저장 창을 열 수 없습니다: " + e.getMessage()); }
     }
 
-    private void showExportDialog() {
-        if (currentPath.isEmpty()) return;
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("내보내기 / 파일 형식 변환");
-
-        final String[] formats = {
-                "PNG 이미지 (.png)",
-                "JPEG 이미지 (.jpg - 고화질)",
-                "WebP 이미지 (.webp)",
-                "BMP 비트맵 (.bmp)",
-                "GIF 이미지 (.gif)",
-                "TIFF 무손실 (.tiff)",
-                "ICO 아이콘 (.ico)",
-                "PDF 문서 (.pdf)",
-                "다른 이름으로 기기에 저장 (시스템 선택기)"
-        };
-        final String[] exts = {".png", ".jpg", ".webp", ".bmp", ".gif", ".tiff", ".ico", ".pdf", "system"};
-
-        b.setItems(formats, new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                String targetExt = exts[which];
-                if ("system".equals(targetExt)) {
-                    saveCurrentFile(true);
-                    return;
-                }
-                exportCurrentToFormat(targetExt);
-            }
-        });
-        b.setNegativeButton("취소", null);
-        b.show();
+    private void showMoreExportFormatsDialog() {
+        String[] labels = {"BMP 비트맵 (.bmp)", "GIF 이미지 (.gif)", "ICO 아이콘 (.ico)"};
+        String[] exts = {".bmp", ".gif", ".ico"};
+        new AlertDialog.Builder(this).setTitle("추가 형식 변환").setItems(labels, (d, w) -> exportCurrentToFormat(exts[w])).setNegativeButton("취소", null).show();
     }
 
     private void exportCurrentToFormat(String targetExt) {
@@ -3019,515 +2098,102 @@ public class MainActivity extends Activity {
                 PdfHost.begin(wid, outFile.getAbsolutePath());
                 if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
                     Bitmap flat = MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations());
-                    float wPt = 595f;
-                    float hPt = 595f * ((float) flat.getHeight() / Math.max(1, flat.getWidth()));
-                    ViewerExports.require(PdfHost.addPageBitmap(wid,wPt,hPt,flat,exportQuality),"ok");
+                    float wPt = 595f, hPt = 595f * ((float) flat.getHeight() / Math.max(1, flat.getWidth()));
+                    ViewerExports.require(PdfHost.addPageBitmap(wid, wPt, hPt, flat, exportQuality), "ok");
                     flat.recycle();
                 } else if ("pdf".equals(currentKind)) {
                     for (MarkupModel.PdfPageItem p : stageCanvasView.getPdfPages()) {
-                        Bitmap bmp = p.renderFlattened(ViewerExports.pdfWidth(p,exportDpi));
-                        ViewerExports.require(PdfHost.addPageBitmap(wid,p.displayWidthPt(),p.displayHeightPt(),bmp,exportQuality),"ok");
+                        Bitmap bmp = p.renderFlattened(ViewerExports.pdfWidth(p, exportDpi));
+                        ViewerExports.require(PdfHost.addPageBitmap(wid, p.displayWidthPt(), p.displayHeightPt(), bmp, exportQuality), "ok");
                         bmp.recycle();
                     }
                 } else if ("doc".equals(currentKind)) {
                     int width = Math.round(595f * exportDpi / 72), height = Math.round(842f * exportDpi / 72);
                     for (int page = 0; page < nativeDocView.printPageCount(width, height); page++) {
                         Bitmap docBmp = nativeDocView.printPage(page, width, height);
-                        ViewerExports.require(PdfHost.addPageBitmap(wid, 595f, 842f, docBmp, exportQuality), "ok"); docBmp.recycle();
+                        ViewerExports.require(PdfHost.addPageBitmap(wid, 595f, 842f, docBmp, exportQuality), "ok");
+                        docBmp.recycle();
                     }
                 }
                 Map<String, Object> res = PdfHost.end(wid, outFile.getName());
                 if (Boolean.TRUE.equals(res.get("ok"))) {
                     scanMediaFile(outFile.getAbsolutePath());
-                    toast("PDF로 내보냈습니다: " + outFile.getName());
                     promptSystemSavePicker(outFile.getName(), Util.readAllBytes(outFile));
                 }
                 return;
             }
-
-            // Export to Raster Image Format
             Bitmap srcBmp = null;
             if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
-                srcBmp = stageCanvasView.getImageAnnotations().isEmpty()?stageCanvasView.getImageBitmap():MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(),stageCanvasView.getImageAnnotations());
+                srcBmp = stageCanvasView.getImageAnnotations().isEmpty()
+                        ? stageCanvasView.getImageBitmap()
+                        : MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations());
             } else if ("pdf".equals(currentKind) && !stageCanvasView.getPdfPages().isEmpty()) {
-                MarkupModel.PdfPageItem page=stageCanvasView.getPdfPages().get(stageCanvasView.getCurrentPdfPage());
-                srcBmp = page.renderFlattened(ViewerExports.pdfWidth(page,exportDpi));
+                MarkupModel.PdfPageItem page = stageCanvasView.getPdfPages().get(stageCanvasView.getCurrentPdfPage());
+                srcBmp = page.renderFlattened(ViewerExports.pdfWidth(page, exportDpi));
             }
-            if (srcBmp == null) {
-                toast("이미지로 변환할 수 없는 항목입니다");
-                return;
-            }
+            if (srcBmp == null) { toast("이미지로 변환할 수 없는 항목입니다"); return; }
             Map<String, Object> saved = FileOps.saveBitmap(outFile.getAbsolutePath(), srcBmp, exportQuality);
-            if(srcBmp!=stageCanvasView.getImageBitmap())srcBmp.recycle();
+            if (srcBmp != stageCanvasView.getImageBitmap()) srcBmp.recycle();
             if (Boolean.TRUE.equals(saved.get("success"))) {
                 scanMediaFile(outFile.getAbsolutePath());
-                toast("변환 완료: " + outFile.getName());
                 promptSystemSavePicker(outFile.getName(), Util.readAllBytes(outFile));
             }
-        } catch (OutOfMemoryError memory) {
-            toast("원본 해상도로 내보낼 메모리가 부족합니다. 다른 앱을 닫고 다시 시도해 주세요.");
-        } catch (Exception e) {
-            toast("내보내기 오류: " + e.getMessage());
-        }
+        } catch (Exception | OutOfMemoryError e) { toast("내보내기 오류: " + e.getMessage()); }
     }
 
     private void scanMediaFile(String path) {
+        try { MediaScannerConnection.scanFile(this, new String[]{path}, null, null); } catch (Exception ignored) {}
+    }
+
+    private void printCurrentFile() {
+        if (!hasOpenFile()) return;
+        PrintManager manager = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+        if (manager != null) manager.print(new File(currentPath).getName(),
+                new ViewerPrintAdapter(this, new File(currentPath).getName(), currentKind, stageCanvasView, nativeDocView), null);
+    }
+
+    private void shareCurrentFile() {
+        if (!hasOpenFile()) return;
         try {
-            MediaScannerConnection.scanFile(this, new String[]{path}, null, null);
-        } catch (Exception ignored) {}
+            File f = isModified ? ViewerExports.snapshot(this, currentPath, currentKind, stageCanvasView, nativeDocView, exportQuality, exportDpi) : new File(currentPath);
+            Uri uri = ViewerFileProvider.getUriForFile(this, f);
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType(FileOps.mimeOf(Util.extOf(currentPath)));
+            intent.putExtra(Intent.EXTRA_STREAM, uri);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(intent, "파일 공유"));
+        } catch (Exception e) { toast("공유할 수 없습니다: " + e.getMessage()); }
     }
 
-    // 3. Resize Image Dialog
-    private void showResizeImageDialog() {
-        final Bitmap cur = stageCanvasView.getImageBitmap();
-        if (cur == null) return;
-        final int origW = cur.getWidth(), origH = cur.getHeight();
-        final double ratio = (double) origW / Math.max(1, origH);
-
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("이미지 크기 조절 (" + origW + " × " + origH + ")");
-
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(18);
-        box.setPadding(pad, pad, pad, pad);
-
-        final EditText wEdit = new EditText(this);
-        wEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-        wEdit.setText(String.valueOf(origW));
-        wEdit.setHint("가로 (px)");
-
-        final EditText hEdit = new EditText(this);
-        hEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-        hEdit.setText(String.valueOf(origH));
-        hEdit.setHint("세로 (px)");
-
-        final CheckBox lockAspect = new CheckBox(this);
-        lockAspect.setText("가로/세로 비율 유지");
-        lockAspect.setChecked(true);
-
-        final boolean[] updating = {false};
-        wEdit.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override
-            public void afterTextChanged(Editable s) {
-                if (updating[0] || !lockAspect.isChecked()) return;
-                int w = Util.toInt(s.toString(), 0);
-                if (w > 0) {
-                    updating[0] = true;
-                    hEdit.setText(String.valueOf(Math.max(1, (int) Math.round(w / ratio))));
-                    updating[0] = false;
-                }
-            }
-        });
-
-        LinearLayout presets = new LinearLayout(this);
-        presets.setOrientation(LinearLayout.HORIZONTAL);
-        int[] pcts = {25, 50, 75, 150, 200};
-        for (final int pct : pcts) {
-            presets.addView(createSmallActionChip(pct + "%", new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    updating[0] = true;
-                    wEdit.setText(String.valueOf(Math.max(1, origW * pct / 100)));
-                    hEdit.setText(String.valueOf(Math.max(1, origH * pct / 100)));
-                    updating[0] = false;
-                }
-            }));
-        }
-
-        box.addView(wEdit);
-        box.addView(hEdit);
-        box.addView(lockAspect);
-        box.addView(presets);
-        b.setView(box);
-
-        b.setPositiveButton("적용", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                int nw = Util.toInt(wEdit.getText().toString(), origW);
-                int nh = Util.toInt(hEdit.getText().toString(), origH);
-                pushImageUndo();
-                final Bitmap resized;
-                try{resized=ImageEditOps.resize(cur,nw,nh);}catch(OutOfMemoryError memory){toast("요청한 크기를 처리할 메모리가 부족합니다.");return;}
-                stageCanvasView.setImageContent(resized, null, stageCanvasView.getImageAnnotations(), true);
-                markModified();
-                updateHeaderTitles();
-                updateStatusBar();
-            }
-        });
-        b.setNegativeButton("취소", null);
-        b.show();
-    }
-
-    // 4. Color Adjustment Sliders Dialog
-    private void showColorAdjustDialog() {
-        if (stageCanvasView.getImageBitmap() == null) return;
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("색상 및 밝기 상세 보정");
-
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(16);
-        box.setPadding(pad, dp(8), pad, dp(8));
-
-        box.addView(createAdjustSeekBar("밝기 (Exposure)", (int) (adjExp + 100), 200, new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                adjExp = progress - 100f;
-                updateLiveAdjustPreview();
-            }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        }));
-
-        box.addView(createAdjustSeekBar("대비 (Contrast)", (int) (adjCon + 100), 200, new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                adjCon = progress - 100f;
-                updateLiveAdjustPreview();
-            }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        }));
-
-        box.addView(createAdjustSeekBar("채도 (Saturation)", (int) (adjSat + 100), 200, new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                adjSat = progress - 100f;
-                updateLiveAdjustPreview();
-            }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        }));
-
-        box.addView(createAdjustSeekBar("색온도 (Warmth)", (int) (adjWarm + 100), 200, new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                adjWarm = progress - 100f;
-                updateLiveAdjustPreview();
-            }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        }));
-
-        box.addView(createAdjustSeekBar("선명도 (Sharpness)", (int) adjSharp, 100, new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                adjSharp = progress;
-            }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        }));
-
-        b.setView(box);
-        b.setPositiveButton("적용", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                commitColorAdjustments();
-            }
-        });
-        b.setNeutralButton("초기화", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                resetColorAdjustments();
-            }
-        });
-        b.setNegativeButton("닫기", null);
-        b.show();
-    }
-
-    private View createAdjustSeekBar(String label, int initVal, int maxVal, SeekBar.OnSeekBarChangeListener listener) {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.VERTICAL);
-        l.setPadding(0, dp(4), 0, dp(4));
-        TextView tv = new TextView(this);
-        tv.setText(label);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        SeekBar sb = new SeekBar(this);
-        sb.setMax(maxVal);
-        sb.setProgress(Math.max(0, Math.min(maxVal, initVal)));
-        sb.setOnSeekBarChangeListener(listener);
-        l.addView(tv);
-        l.addView(sb);
-        return l;
-    }
-
-    // 5. Add Text Annotation Dialog
-    private void showAddTextAnnotationDialog(final float docX, final float docY, final int pageIndex) {
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("텍스트 주석 추가");
-        final EditText et = new EditText(this);
-        et.setHint("추가할 텍스트를 입력하세요...");
-        b.setView(et);
-        b.setPositiveButton("추가", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                String txt = et.getText().toString().trim();
-                if (txt.isEmpty()) return;
-                MarkupModel.Annotation a = new MarkupModel.Annotation("txt_" + System.currentTimeMillis(), "text");
-                a.text = txt;
-                a.x = docX;
-                a.y = docY;
-                a.color = stageCanvasView.getMarkupColor();
-                a.fontSize = stageCanvasView.getMarkupFontSize();
-                if ("image".equals(currentKind)) {
-                    pushImageUndo();
-                    stageCanvasView.getImageAnnotations().add(a);
-                } else if ("pdf".equals(currentKind) && pageIndex >= 0 && pageIndex < stageCanvasView.getPdfPages().size()) {
-                    stageCanvasView.getPdfPages().get(pageIndex).anns.add(a);
-                }
-                markModified();
-                stageCanvasView.invalidate();
-                if (sidebarVisible) refreshSidebarContent();
-            }
-        });
-        b.setNegativeButton("취소", null);
-        b.show();
-    }
-
-    // 6. Signature Pad Dialog (Draw or Type Signature)
-    private void showSignatureDialog(final float docX, final float docY, final int pageIndex) {
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("서명 그리기 및 삽입");
-
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(14);
-        box.setPadding(pad, pad, pad, pad);
-
-        final int[] inkColor = {0xFF111111};
-        final Path sigPath = new Path();
-        final Paint sigPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        sigPaint.setStyle(Paint.Style.STROKE);
-        sigPaint.setStrokeWidth(dp(3.5f));
-        sigPaint.setStrokeCap(Paint.Cap.ROUND);
-        sigPaint.setStrokeJoin(Paint.Join.ROUND);
-        sigPaint.setColor(inkColor[0]);
-
-        final View padView = new View(this) {
-            private float lx, ly;
-            @Override
-            protected void onDraw(Canvas canvas) {
-                super.onDraw(canvas);
-                canvas.drawColor(Color.WHITE);
-                sigPaint.setColor(inkColor[0]);
-                canvas.drawPath(sigPath, sigPaint);
-            }
-
-            @Override
-            public boolean onTouchEvent(MotionEvent event) {
-                float x = event.getX(), y = event.getY();
-                switch (event.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        sigPath.moveTo(x, y);
-                        lx = x; ly = y;
-                        invalidate();
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        sigPath.quadTo(lx, ly, (x + lx) * 0.5f, (y + ly) * 0.5f);
-                        lx = x; ly = y;
-                        invalidate();
-                        return true;
-                }
-                return true;
-            }
-        };
-        GradientDrawable pBg = new GradientDrawable();
-        pBg.setColor(Color.WHITE);
-        pBg.setStroke(dp(1), 0xFFCCCCCC);
-        padView.setBackground(pBg);
-        box.addView(padView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(170)));
-
-        LinearLayout opts = new LinearLayout(this);
-        opts.setOrientation(LinearLayout.HORIZONTAL);
-        opts.setPadding(0, dp(8), 0, 0);
-        opts.addView(createSmallActionChip("검정 잉크", new View.OnClickListener() {
-            @Override public void onClick(View v) { inkColor[0] = 0xFF111111; padView.invalidate(); }
-        }));
-        opts.addView(createSmallActionChip("파랑 잉크", new View.OnClickListener() {
-            @Override public void onClick(View v) { inkColor[0] = 0xFF0381FE; padView.invalidate(); }
-        }));
-        opts.addView(createSmallActionChip("빨강 잉크", new View.OnClickListener() {
-            @Override public void onClick(View v) { inkColor[0] = 0xFFE53935; padView.invalidate(); }
-        }));
-        opts.addView(createSmallActionChip("지우기", new View.OnClickListener() {
-            @Override public void onClick(View v) { sigPath.reset(); padView.invalidate(); }
-        }));
-        box.addView(opts);
-
-        b.setView(box);
-        b.setPositiveButton("서명 삽입", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                Bitmap sigBmp = Bitmap.createBitmap(Math.max(200, padView.getWidth()), Math.max(100, padView.getHeight()), Bitmap.Config.ARGB_8888);
-                Canvas c = new Canvas(sigBmp);
-                sigPaint.setColor(inkColor[0]);
-                c.drawPath(sigPath, sigPaint);
-                savedSignatures.add(sigBmp);
-
-                MarkupModel.Annotation a = new MarkupModel.Annotation("sig_" + System.currentTimeMillis(), "sign");
-                a.sigBitmap = sigBmp;
-                a.x = docX;
-                a.y = docY;
-                a.w = 150f;
-                a.h = 75f;
-                if ("image".equals(currentKind)) {
-                    pushImageUndo();
-                    stageCanvasView.getImageAnnotations().add(a);
-                } else if ("pdf".equals(currentKind) && pageIndex >= 0 && pageIndex < stageCanvasView.getPdfPages().size()) {
-                    stageCanvasView.getPdfPages().get(pageIndex).anns.add(a);
-                }
-                markModified();
-                stageCanvasView.invalidate();
-                if (sidebarVisible) refreshSidebarContent();
-            }
-        });
-        b.setNegativeButton("취소", null);
-        b.show();
-    }
-
-    // 7. PDF Page Organization Dialog
-    private void showPdfPageOrganizeDialog() {
-        if (!"pdf".equals(currentKind) || stageCanvasView.getPdfPages().isEmpty()) return;
-        final List<MarkupModel.PdfPageItem> pages = stageCanvasView.getPdfPages();
-        final int idx = stageCanvasView.getCurrentPdfPage();
-
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("PDF 페이지 관리 (현재 " + (idx + 1) + " / " + pages.size() + " 페이지)");
-        String[] actions = {
-                "현재 페이지 왼쪽 90° 회전",
-                "현재 페이지 오른쪽 90° 회전",
-                "현재 페이지 복제",
-                "현재 페이지를 앞으로 이동 (위로)",
-                "현재 페이지를 뒤로 이동 (아래로)",
-                "현재 페이지 뒤에 빈 페이지 추가",
-                "외부 PDF 또는 이미지 파일 삽입...",
-                "현재 페이지를 PNG 이미지로 추출",
-                "현재 페이지 삭제"
-        };
-        b.setItems(actions, new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                switch (which) {
-                    case 0: rotateCurrentPdfPage(-90); break;
-                    case 1: rotateCurrentPdfPage(90); break;
-                    case 2: {
-                        MarkupModel.PdfPageItem copy = pages.get(idx).copy("dup_" + System.currentTimeMillis());
-                        pages.add(idx + 1, copy);
-                        markModified();
-                        stageCanvasView.setCurrentPdfPage(idx + 1);
-                        if (sidebarVisible) refreshSidebarContent();
-                        toast("페이지를 복제했습니다");
-                        break;
-                    }
-                    case 3: {
-                        if (idx > 0) {
-                            Collections.swap(pages, idx, idx - 1);
-                            markModified();
-                            stageCanvasView.setCurrentPdfPage(idx - 1);
-                            if (sidebarVisible) refreshSidebarContent();
-                        }
-                        break;
-                    }
-                    case 4: {
-                        if (idx + 1 < pages.size()) {
-                            Collections.swap(pages, idx, idx + 1);
-                            markModified();
-                            stageCanvasView.setCurrentPdfPage(idx + 1);
-                            if (sidebarVisible) refreshSidebarContent();
-                        }
-                        break;
-                    }
-                    case 5: insertBlankPdfPage(); break;
-                    case 6: {
-                        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                        intent.addCategory(Intent.CATEGORY_OPENABLE);
-                        intent.setType("*/*");
-                        startActivityForResult(intent, REQ_INSERT_PAGE_DOC);
-                        break;
-                    }
-                    case 7: exportCurrentToFormat(".png"); break;
-                    case 8: {
-                        if (pages.size() <= 1) {
-                            toast("마지막 남은 페이지는 삭제할 수 없습니다");
-                            return;
-                        }
-                        pages.remove(idx);
-                        markModified();
-                        stageCanvasView.setCurrentPdfPage(Math.max(0, idx - 1));
-                        if (sidebarVisible) refreshSidebarContent();
-                        toast("페이지를 삭제했습니다");
-                        break;
-                    }
-                }
-            }
-        });
-        b.setNegativeButton("닫기", null);
-        b.show();
-    }
-
-    private void showPdfJumpPageDialog() {
-        final int total = stageCanvasView.getPdfPages().size();
-        if (total <= 0) return;
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("페이지 이동 (1 ~ " + total + ")");
-        final EditText et = new EditText(this);
-        et.setInputType(InputType.TYPE_CLASS_NUMBER);
-        et.setText(String.valueOf(stageCanvasView.getCurrentPdfPage() + 1));
-        b.setView(et);
-        b.setPositiveButton("이동", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                int p = Util.toInt(et.getText().toString(), 1);
-                stageCanvasView.setCurrentPdfPage(p - 1);
-            }
-        });
-        b.setNegativeButton("취소", null);
-        b.show();
-    }
-
-    // ---------- Search & Offline OCR Execution ----------
-    private void toggleSearchBar() {
-        if(currentPath.isEmpty())return;
-        searchBarOpen = !searchBarOpen;
-        if (searchBarOverlay != null) {
-            searchBarOverlay.setVisibility(searchBarOpen ? View.VISIBLE : View.GONE);
-        }
-        if (searchBarOpen && searchInputEdit != null) {
-            searchInputEdit.requestFocus();
-        }
-    }
-
-    private void closeSearchBar() {
-        searchBarOpen = false;
-        if (searchBarOverlay != null) searchBarOverlay.setVisibility(View.GONE);
-        currentOcrBoxes.clear();
-        stageCanvasView.setOcrBoxes(null, -1);
+    // ---- Search / Offline OCR ----
+    String searchSummaryLabel() {
+        if ("doc".equals(currentKind)) return docHitTotal > 0 ? ((docHitIndex + 1) + "/" + docHitTotal) : "";
+        if (!currentOcrBoxes.isEmpty()) return (activeOcrHit + 1) + "/" + currentOcrBoxes.size();
+        return "";
     }
 
     @SuppressWarnings("unchecked")
-    private void executeSearchOrOcr(String query) {
+    void executeSearchOrOcr(String query) {
         final String q = query == null ? "" : query.trim(), path = currentPath, kind = currentKind;
-        lastSearchQuery = q;
         if ("doc".equals(kind)) { nativeDocView.performSearch(q); return; }
         if (!"pdf".equals(kind) && !"image".equals(kind)) return;
         final int ticket = ++searchTicket;
-        final Bitmap input = "image".equals(kind) && stageCanvasView.getImageBitmap() != null ? stageCanvasView.getImageBitmap().copy(Bitmap.Config.ARGB_8888, false) : null;
-        final List<MarkupModel.PdfPageItem> pages = "pdf".equals(kind) ? copyPdfState() : new ArrayList<>();
+        final Bitmap input = "image".equals(kind) && stageCanvasView.getImageBitmap() != null
+                ? stageCanvasView.getImageBitmap().copy(Bitmap.Config.ARGB_8888, false) : null;
+        final List<MarkupModel.PdfPageItem> pList = "pdf".equals(kind) ? copyPdfState() : new ArrayList<>();
         toast("텍스트를 인식하고 있어요…");
         ocrPool.execute(() -> {
-            List<StageCanvasView.OcrBox> boxes = new ArrayList<>(); StringBuilder text = new StringBuilder();
+            List<StageCanvasView.OcrBox> boxes = new ArrayList<>();
+            StringBuilder text = new StringBuilder();
             try {
-                int count = "image".equals(kind) ? 1 : pages.size();
+                int count = "image".equals(kind) ? 1 : pList.size();
                 for (int index = 0; index < count; index++) {
                     if (searchTicket != ticket || Thread.currentThread().isInterrupted()) return;
                     Map<String, Object> result;
                     boolean normalized = "pdf".equals(kind);
                     if (!normalized) { if (input == null) return; result = OcrHost.recognizeBitmap(input); }
                     else {
-                        MarkupModel.PdfPageItem page = pages.get(index);
+                        MarkupModel.PdfPageItem page = pList.get(index);
                         if ("pdf".equals(page.kind) && page.rot == 0 && page.anns.isEmpty()) result = OcrHost.pdfPageText(page.srcPath, page.srcPageIdx);
                         else {
                             Bitmap bitmap = page.renderFlattened(1800);
@@ -3538,64 +2204,326 @@ public class MainActivity extends Activity {
                     if (normalized) text.append("[페이지 ").append(index + 1).append("]\n");
                     text.append(result.get("text")).append('\n');
                     List<?> words = (List<?>) result.get(normalized ? "items" : "words");
-                    if (words != null) for (Object item : words) {
-                        Map<?, ?> word = (Map<?, ?>)item; String value = String.valueOf(word.get("t"));
-                        if (q.isEmpty() || value.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) boxes.add(new StageCanvasView.OcrBox(normalized ? index : -1, (float)Util.toDouble(word.get("x"), 0), (float)Util.toDouble(word.get("y"), 0), (float)Util.toDouble(word.get("w"), 0), (float)Util.toDouble(word.get("h"), 0), normalized, value));
+                    if (words != null) {
+                        for (Object item : words) {
+                            Map<?, ?> word = (Map<?, ?>) item;
+                            String value = String.valueOf(word.get("t"));
+                            if (q.isEmpty() || value.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) {
+                                boxes.add(new StageCanvasView.OcrBox(normalized ? index : -1,
+                                        (float) Util.toDouble(word.get("x"), 0), (float) Util.toDouble(word.get("y"), 0),
+                                        (float) Util.toDouble(word.get("w"), 0), (float) Util.toDouble(word.get("h"), 0), normalized, value));
+                            }
+                        }
                     }
                 }
                 mainHandler.post(() -> {
                     if (isFinishing() || ticket != searchTicket || !path.equals(currentPath)) return;
-                    fullExtractedOcrText = text.toString(); currentOcrBoxes.clear(); currentOcrBoxes.addAll(boxes); activeOcrHit = boxes.isEmpty() ? -1 : 0;
+                    fullExtractedOcrText = text.toString();
+                    currentOcrBoxes.clear();
+                    currentOcrBoxes.addAll(boxes);
+                    activeOcrHit = boxes.isEmpty() ? -1 : 0;
                     stageCanvasView.setOcrBoxes(boxes, activeOcrHit);
-                    if (searchCountLabel != null) searchCountLabel.setText(boxes.isEmpty() ? "0 / 0" : "1 / " + boxes.size());
+                    syncChromeState();
                     toast(boxes.isEmpty() ? "일치하는 텍스트가 없어요." : boxes.size() + "개 텍스트를 찾았어요.");
                 });
-            } catch (Exception | LinkageError e) { if (ticket == searchTicket) toast("텍스트 인식 실패: " + e.getMessage()); }
-            finally { if (input != null) input.recycle(); }
+            } catch (Exception | LinkageError e) {
+                if (ticket == searchTicket) toast("텍스트 인식 실패: " + e.getMessage());
+            } finally {
+                if (input != null) input.recycle();
+            }
         });
     }
-    private void stepSearchOrOcr(int delta) {
-        if ("doc".equals(currentKind)) {
-            nativeDocView.stepSearch(delta);
-            return;
-        }
+
+    void stepSearchOrOcr(int delta) {
+        if ("doc".equals(currentKind)) { nativeDocView.stepSearch(delta); return; }
         if (currentOcrBoxes.isEmpty()) return;
         activeOcrHit = (activeOcrHit + delta + currentOcrBoxes.size()) % currentOcrBoxes.size();
         stageCanvasView.setOcrBoxes(currentOcrBoxes, activeOcrHit);
-        if (searchCountLabel != null) {
-            searchCountLabel.setText((activeOcrHit + 1) + " / " + currentOcrBoxes.size());
-        }
+        syncChromeState();
     }
 
-    private void showFullExtractedTextDialog() {
+    void showFullExtractedTextDialog() {
         String text = "doc".equals(currentKind) ? nativeDocView.getPlainTextAll() : fullExtractedOcrText;
         if (text == null || text.trim().isEmpty()) {
             executeSearchOrOcr("");
-            toast("텍스트를 추출 중입니다. 잠시 후 다시 눌러주세요.");
+            toast("텍스트를 추출 중입니다. 잠시 후 다시 열어 주세요.");
             return;
         }
         final String finalText = text;
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("추출된 전체 텍스트");
         ScrollView sv = new ScrollView(this);
         TextView tv = new TextView(this);
         tv.setText(finalText);
-        tv.setPadding(dp(18), dp(12), dp(18), dp(12));
+        tv.setPadding(Ui.dp(20), Ui.dp(14), Ui.dp(20), Ui.dp(14));
         tv.setTextIsSelectable(true);
         sv.addView(tv);
-        b.setView(sv);
-        b.setPositiveButton("전체 복사", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                copyToClipboard(finalText);
-                toast("전체 텍스트를 복사했습니다");
-            }
-        });
-        b.setNegativeButton("닫기", null);
-        b.show();
+        new AlertDialog.Builder(this).setTitle("추출된 전체 텍스트").setView(sv)
+                .setPositiveButton("전체 복사", (d, w) -> { copyToClipboard(finalText); toast("복사했습니다"); })
+                .setNegativeButton("닫기", null).show();
     }
 
-    // ---------- Slideshow, Print, Share, Bookmarks, Overflow Menu ----------
+    // ---- Native Dialogs (Color Adjust, Resize, Text/Sign Annotation, PDF Organize, File Info, Rename/Delete) ----
+    private void showColorAdjustDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(Ui.dp(18), Ui.dp(12), Ui.dp(18), Ui.dp(8));
+        box.addView(adjustRow("노출", Math.round((adjExp + 1f) * 50), 100, v -> { adjExp = (v - 50) / 50f; updateLiveAdjustPreview(); }));
+        box.addView(adjustRow("대비", Math.round((adjCon + 1f) * 50), 100, v -> { adjCon = (v - 50) / 50f; updateLiveAdjustPreview(); }));
+        box.addView(adjustRow("채도", Math.round((adjSat + 1f) * 50), 100, v -> { adjSat = (v - 50) / 50f; updateLiveAdjustPreview(); }));
+        box.addView(adjustRow("색온도", Math.round((adjWarm + 1f) * 50), 100, v -> { adjWarm = (v - 50) / 50f; updateLiveAdjustPreview(); }));
+        box.addView(adjustRow("선명도", Math.round(adjSharp * 100), 100, v -> adjSharp = v / 100f));
+        CheckBox sepia = new CheckBox(this); sepia.setText("세피아"); sepia.setChecked(adjSepia);
+        sepia.setOnCheckedChangeListener((b, ch) -> { adjSepia = ch; updateLiveAdjustPreview(); });
+        box.addView(sepia);
+        CheckBox inv = new CheckBox(this); inv.setText("색상 반전"); inv.setChecked(adjInvert);
+        inv.setOnCheckedChangeListener((b, ch) -> { adjInvert = ch; updateLiveAdjustPreview(); });
+        box.addView(inv);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(box);
+        new AlertDialog.Builder(this).setTitle("색상 보정").setView(sv)
+                .setPositiveButton("적용", (d, w) -> commitColorAdjustments())
+                .setNeutralButton("초기화", (d, w) -> { resetColorAdjustments(); setTool("hand"); })
+                .setNegativeButton("취소", (d, w) -> { resetColorAdjustments(); setTool("hand"); })
+                .show();
+    }
+
+    private View adjustRow(String label, int initVal, int maxVal, java.util.function.IntConsumer onChange) {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.VERTICAL);
+        r.setPadding(0, Ui.dp(4), 0, Ui.dp(4));
+        TextView tv = Ui.text(this, label, 13.5f, Ui.semibold, Ui.text());
+        r.addView(tv);
+        SeekBar sb = new SeekBar(this);
+        sb.setMax(maxVal);
+        sb.setProgress(initVal);
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int progress, boolean fromUser) { if (fromUser) onChange.accept(progress); }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+        r.addView(sb);
+        return r;
+    }
+
+    private void showResizeImageDialog() {
+        Bitmap cur = stageCanvasView.getImageBitmap();
+        if (cur == null) return;
+        int origW = cur.getWidth(), origH = cur.getHeight();
+        double ratio = (double) origW / Math.max(1, origH);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(Ui.dp(20), Ui.dp(12), Ui.dp(20), Ui.dp(8));
+        EditText ew = new EditText(this); ew.setInputType(InputType.TYPE_CLASS_NUMBER); ew.setHint("너비 (px)"); ew.setText(String.valueOf(origW));
+        EditText eh = new EditText(this); eh.setInputType(InputType.TYPE_CLASS_NUMBER); eh.setHint("높이 (px)"); eh.setText(String.valueOf(origH));
+        CheckBox lock = new CheckBox(this); lock.setText("가로·세로 비율 유지"); lock.setChecked(true);
+        final boolean[] syncing = {false};
+        ew.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (syncing[0] || !lock.isChecked()) return;
+                try {
+                    int w = Integer.parseInt(s.toString());
+                    syncing[0] = true; eh.setText(String.valueOf(Math.max(1, (int) Math.round(w / ratio)))); syncing[0] = false;
+                } catch (Exception ignored) {}
+            }
+        });
+        box.addView(ew); box.addView(eh); box.addView(lock);
+        new AlertDialog.Builder(this).setTitle("이미지 크기 조절 (" + origW + " × " + origH + ")").setView(box)
+                .setPositiveButton("적용", (d, w) -> {
+                    try {
+                        int nw = Math.max(1, Math.min(12000, Integer.parseInt(ew.getText().toString())));
+                        int nh = Math.max(1, Math.min(12000, Integer.parseInt(eh.getText().toString())));
+                        pushImageUndo();
+                        Bitmap resized = ImageEditOps.resize(cur, nw, nh);
+                        stageCanvasView.setImageContent(resized, null, stageCanvasView.getImageAnnotations(), true);
+                        markModified();
+                        syncChromeState();
+                    } catch (Exception e) { toast("올바른 크기를 입력해 주세요"); }
+                }).setNegativeButton("취소", null).show();
+    }
+
+    private void showAddTextAnnotationDialog(float docX, float docY, int pageIndex) {
+        EditText input = new EditText(this);
+        input.setHint("주석 내용을 입력하세요");
+        new AlertDialog.Builder(this).setTitle("텍스트 주석 추가").setView(input)
+                .setPositiveButton("추가", (d, w) -> {
+                    String txt = input.getText().toString().trim();
+                    if (txt.isEmpty()) return;
+                    MarkupModel.Annotation ann = new MarkupModel.Annotation("txt_" + System.currentTimeMillis(), "text");
+                    ann.x = docX; ann.y = docY; ann.text = txt;
+                    ann.color = stageCanvasView.getMarkupColor();
+                    ann.fontSize = stageCanvasView.getMarkupFontSize();
+                    if ("image".equals(currentKind)) { pushImageUndo(); stageCanvasView.getImageAnnotations().add(ann); }
+                    else if ("pdf".equals(currentKind) && pageIndex >= 0 && pageIndex < stageCanvasView.getPdfPages().size()) {
+                        stageCanvasView.getPdfPages().get(pageIndex).anns.add(ann);
+                    }
+                    markModified();
+                    stageCanvasView.invalidate();
+                    syncChromeState();
+                }).setNegativeButton("취소", null).show();
+    }
+
+    private void showSignatureDialog(float docX, float docY, int pageIndex) {
+        final Path sigPath = new Path();
+        final Paint sigPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        sigPaint.setStyle(Paint.Style.STROKE);
+        sigPaint.setStrokeWidth(Ui.dpf(3.2f));
+        sigPaint.setStrokeCap(Paint.Cap.ROUND);
+        sigPaint.setColor(0xFF111111);
+        View pad = new View(this) {
+            @Override protected void onDraw(Canvas c) {
+                c.drawColor(0xFFFFFFFF);
+                c.drawPath(sigPath, sigPaint);
+            }
+            @Override public boolean onTouchEvent(MotionEvent e) {
+                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) sigPath.moveTo(e.getX(), e.getY());
+                else if (e.getActionMasked() == MotionEvent.ACTION_MOVE) sigPath.lineTo(e.getX(), e.getY());
+                invalidate();
+                return true;
+            }
+        };
+        pad.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(200)));
+        new AlertDialog.Builder(this).setTitle("서명 그리기").setView(pad)
+                .setPositiveButton("서명 삽입", (d, w) -> {
+                    int pw = Math.max(200, pad.getWidth()), ph = Math.max(120, pad.getHeight());
+                    Bitmap bmp = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888);
+                    Canvas cv = new Canvas(bmp);
+                    cv.drawPath(sigPath, sigPaint);
+                    savedSignatures.add(bmp);
+                    MarkupModel.Annotation ann = new MarkupModel.Annotation("sig_" + System.currentTimeMillis(), "sign");
+                    ann.x = docX; ann.y = docY; ann.w = 180f; ann.h = 90f; ann.sigBitmap = bmp;
+                    if ("image".equals(currentKind)) { pushImageUndo(); stageCanvasView.getImageAnnotations().add(ann); }
+                    else if ("pdf".equals(currentKind) && pageIndex >= 0 && pageIndex < stageCanvasView.getPdfPages().size()) {
+                        stageCanvasView.getPdfPages().get(pageIndex).anns.add(ann);
+                    }
+                    markModified();
+                    stageCanvasView.invalidate();
+                    syncChromeState();
+                }).setNegativeButton("취소", null).show();
+    }
+
+    void showPdfPageOrganizeDialog() {
+        List<MarkupModel.PdfPageItem> pList = stageCanvasView.getPdfPages();
+        if (pList.isEmpty()) return;
+        int idx = stageCanvasView.getCurrentPdfPage();
+        String[] ops = {"현재 페이지 90° 회전", "빈 페이지 뒤에 추가", "파일에서 페이지 삽입", "현재 페이지 앞으로 이동", "현재 페이지 뒤로 이동", "현재 페이지 삭제"};
+        new AlertDialog.Builder(this).setTitle("PDF 페이지 정리 (" + (idx + 1) + "/" + pList.size() + ")")
+                .setItems(ops, (d, w) -> {
+                    switch (w) {
+                        case 0: rotateCurrentPdfPage(90); break;
+                        case 1: insertBlankPdfPage(); break;
+                        case 2: launchInsertPagePicker(); break;
+                        case 3:
+                            if (idx > 0) { Collections.swap(pList, idx, idx - 1); markModified(); stageCanvasView.setCurrentPdfPage(idx - 1); syncChromeState(); }
+                            break;
+                        case 4:
+                            if (idx < pList.size() - 1) { Collections.swap(pList, idx, idx + 1); markModified(); stageCanvasView.setCurrentPdfPage(idx + 1); syncChromeState(); }
+                            break;
+                        case 5:
+                            if (pList.size() <= 1) { toast("마지막 페이지는 삭제할 수 없습니다"); return; }
+                            pList.remove(idx); markModified(); stageCanvasView.setCurrentPdfPage(Math.min(idx, pList.size() - 1)); syncChromeState();
+                            break;
+                    }
+                }).setNegativeButton("닫기", null).show();
+    }
+
+    private void showPdfJumpPageDialog() {
+        int tot = stageCanvasView.getPdfPages().size();
+        if (tot <= 0) return;
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setHint("1 ~ " + tot);
+        new AlertDialog.Builder(this).setTitle("페이지 이동").setView(input)
+                .setPositiveButton("이동", (d, w) -> {
+                    try {
+                        int p = Integer.parseInt(input.getText().toString()) - 1;
+                        stageCanvasView.setCurrentPdfPage(Math.max(0, Math.min(tot - 1, p)));
+                        syncChromeState();
+                    } catch (Exception ignored) {}
+                }).setNegativeButton("취소", null).show();
+    }
+
+    private void showFileInfoDialog() {
+        if (!hasOpenFile()) return;
+        File f = new File(currentPath);
+        StringBuilder sb = new StringBuilder();
+        sb.append("파일명: ").append(f.getName()).append('\n');
+        sb.append("크기: ").append(fmtBytes(f.length())).append('\n');
+        sb.append("종류: ").append(Pages.labelForKind(currentKind)).append('\n');
+        if ("image".equals(currentKind) && stageCanvasView.getImageBitmap() != null) {
+            Bitmap b = stageCanvasView.getImageBitmap();
+            sb.append("해상도: ").append(b.getWidth()).append(" × ").append(b.getHeight()).append(" px\n");
+            try {
+                List<Object> raw = AiMeta.read(currentPath);
+                AiMeta.ParsedAi ai = raw != null && !raw.isEmpty() ? AiMeta.parseAiMeta(raw) : null;
+                if (ai != null) {
+                    sb.append("\n[AI 생성 메타데이터]\n");
+                    if (ai.tool != null && !ai.tool.isEmpty()) sb.append("도구: ").append(ai.tool).append('\n');
+                    if (ai.prompt != null && !ai.prompt.isEmpty()) sb.append("프롬프트: ").append(ai.prompt).append('\n');
+                    if (ai.negative != null && !ai.negative.isEmpty()) sb.append("네거티브: ").append(ai.negative).append('\n');
+                    for (Map.Entry<String, String> se : ai.settings.entrySet()) {
+                        sb.append(se.getKey()).append(": ").append(se.getValue()).append('\n');
+                    }
+                }
+            } catch (Throwable ignored) {}
+        } else if ("pdf".equals(currentKind)) {
+            sb.append("페이지 수: ").append(stageCanvasView.getPdfPages().size()).append('\n');
+        }
+        ScrollView sv = new ScrollView(this);
+        TextView tv = new TextView(this);
+        tv.setText(sb.toString());
+        tv.setTextIsSelectable(true);
+        tv.setPadding(Ui.dp(22), Ui.dp(14), Ui.dp(22), Ui.dp(14));
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        sv.addView(tv);
+        new AlertDialog.Builder(this).setTitle("파일 정보").setView(sv)
+                .setPositiveButton("복사", (d, w) -> { copyToClipboard(sb.toString()); toast("정보를 복사했습니다"); })
+                .setNegativeButton("닫기", null).show();
+    }
+
+    void showSavedCopies(File directory, String title) {
+        File[] saved = directory.listFiles(file -> file.isFile() && !FileOps.kindOf(file.getName()).isEmpty());
+        if (saved == null || saved.length == 0) {
+            new AlertDialog.Builder(this).setTitle(title).setMessage("저장된 파일이 없어요.").setPositiveButton("닫기", null).show();
+            return;
+        }
+        Arrays.sort(saved, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        String[] names = new String[saved.length];
+        for (int i = 0; i < saved.length; i++) names[i] = saved[i].getName();
+        new AlertDialog.Builder(this).setTitle(title)
+                .setItems(names, (d, w) -> guardChanges(() -> loadFolderList(directory.getAbsolutePath(), saved[w].getAbsolutePath())))
+                .setNegativeButton("닫기", null).show();
+    }
+
+    private void showRenameDialog() {
+        if (!hasOpenFile()) return;
+        File f = new File(currentPath);
+        EditText input = new EditText(this);
+        input.setText(f.getName());
+        new AlertDialog.Builder(this).setTitle("이름 바꾸기").setView(input)
+                .setPositiveButton("변경", (d, w) -> {
+                    String n = input.getText().toString().trim();
+                    if (n.isEmpty() || n.equals(f.getName())) return;
+                    File dst = new File(f.getParentFile(), n);
+                    if (f.renameTo(dst)) {
+                        currentPath = dst.getAbsolutePath();
+                        syncChromeState();
+                        toast("이름을 변경했습니다");
+                    } else toast("이름을 변경할 수 없습니다");
+                }).setNegativeButton("취소", null).show();
+    }
+
+    private void showDeleteConfirmDialog() {
+        if (!hasOpenFile()) return;
+        File f = new File(currentPath);
+        new AlertDialog.Builder(this).setTitle("파일 삭제").setMessage("\"" + f.getName() + "\" 파일을 삭제할까요?")
+                .setPositiveButton("삭제", (d, w) -> {
+                    if (f.delete()) { isModified = false; closeCurrentFile(); toast("삭제했습니다"); }
+                    else toast("파일을 삭제할 수 없습니다");
+                }).setNegativeButton("취소", null).show();
+    }
+
+    // ---- Slideshow, Bookmarks, Clipboard, Keyboard Shortcuts ----
     private void startSlideshow() {
         if (isModified) { toast("슬라이드쇼를 시작하기 전에 편집 내용을 저장해 주세요."); return; }
         if (folderItems.isEmpty()) return;
@@ -3619,258 +2547,107 @@ public class MainActivity extends Activity {
         } else if ("pdf".equals(currentKind) && !stageCanvasView.getPdfPages().isEmpty()) {
             slideshowImageView.setImageBitmap(stageCanvasView.getPdfPages().get(stageCanvasView.getCurrentPdfPage()).getOrRenderBaseBitmap(1600));
         }
-        File f = new File(currentPath);
-        slideshowCaptionView.setText((currentFileIndex + 1) + " / " + folderItems.size() + "  ·  " + f.getName() + " (터치하면 종료)");
-    }
-
-    private void printCurrentFile() {
-        if (currentPath.isEmpty()) return;
-        PrintManager manager = (PrintManager)getSystemService(Context.PRINT_SERVICE);
-        if (manager != null) manager.print(new File(currentPath).getName(), new ViewerPrintAdapter(this, new File(currentPath).getName(), currentKind, stageCanvasView, nativeDocView), null);
-    }
-    private void shareCurrentFile() {
-        if (currentPath.isEmpty()) return;
-        try {
-            File f = isModified ? ViewerExports.snapshot(this, currentPath, currentKind, stageCanvasView, nativeDocView, exportQuality, exportDpi) : new File(currentPath);
-            Uri uri = ViewerFileProvider.getUriForFile(this, f);
-            Intent intent = new Intent(Intent.ACTION_SEND);
-            intent.setType(FileOps.mimeOf(Util.extOf(currentPath)));
-            intent.putExtra(Intent.EXTRA_STREAM, uri);
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(Intent.createChooser(intent, "파일 공유"));
-        } catch (Exception e) {
-            toast("공유할 수 없습니다: " + e.getMessage());
-        }
+        slideshowCaptionView.setText((currentFileIndex + 1) + " / " + folderItems.size() + " · " + new File(currentPath).getName() + " (터치하면 종료)");
     }
 
     private void toggleBookmark(String path) {
         if (path == null || path.isEmpty()) return;
-        if (bookmarks.contains(path)) {
-            bookmarks.remove(path);
-            toast("책갈피에서 제거했습니다");
-        } else {
-            bookmarks.add(path);
-            toast("책갈피에 추가했습니다");
-        }
+        if (bookmarks.contains(path)) { bookmarks.remove(path); toast("책갈피에서 제거했습니다"); }
+        else { bookmarks.add(path); toast("책갈피에 추가했습니다"); }
         saveBookmarks();
-        refreshToolbars();
+        if (filesPage != null) filesPage.refresh();
+        syncChromeState();
     }
 
     private void loadBookmarks() {
         bookmarks.clear();
-        String raw = prefs.getString("bookmarks_json", "[]");
         try {
-            Object parsed = Util.jsonParse(raw);
+            Object parsed = Util.jsonParse(prefs.getString("bookmarks_json", "[]"));
             if (parsed instanceof List) {
-                for (Object o : (List<?>) parsed) {
-                    if (o != null) bookmarks.add(String.valueOf(o));
-                }
+                for (Object o : (List<?>) parsed) if (o != null) bookmarks.add(String.valueOf(o));
             }
         } catch (Exception ignored) {}
     }
 
     private void saveBookmarks() {
-        List<Object> l = new ArrayList<Object>(bookmarks);
-        prefs.edit().putString("bookmarks_json", Util.jsonStringify(l)).apply();
+        prefs.edit().putString("bookmarks_json", Util.jsonStringify(new ArrayList<>(bookmarks))).apply();
     }
 
     private void copyToClipboard(String text) {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (cm != null) {
-            cm.setPrimaryClip(ClipData.newPlainText("SamsungViewer", text));
-        }
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("SamsungViewer", text));
     }
 
     private void copyCurrentImage() {
         try {
-            Bitmap bitmap = "image".equals(currentKind) ? MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations()) : "pdf".equals(currentKind) ? stageCanvasView.getPdfPages().get(stageCanvasView.getCurrentPdfPage()).renderFlattened(1800) : null;
+            Bitmap bitmap = "image".equals(currentKind)
+                    ? MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations())
+                    : ("pdf".equals(currentKind) ? stageCanvasView.getPdfPages().get(stageCanvasView.getCurrentPdfPage()).renderFlattened(1800) : null);
             if (bitmap == null) { toast("복사할 이미지가 없어요."); return; }
-            RectF selection = stageCanvasView.getSelectionRect();
-            if ("image".equals(currentKind) && selection != null && selection.width() > 0 && selection.height() > 0) {
-                int x = Math.max(0, (int)selection.left), y = Math.max(0, (int)selection.top);
-                int w = Math.min(bitmap.getWidth() - x, Math.max(1, (int)selection.width())), h = Math.min(bitmap.getHeight() - y, Math.max(1, (int)selection.height()));
-                Bitmap cropped = Bitmap.createBitmap(bitmap, x, y, w, h); if (cropped != bitmap) bitmap.recycle(); bitmap = cropped;
+            RectF sel = stageCanvasView.getSelectionRect();
+            if ("image".equals(currentKind) && sel != null && sel.width() > 0 && sel.height() > 0) {
+                int x = Math.max(0, (int) sel.left), y = Math.max(0, (int) sel.top);
+                int w = Math.min(bitmap.getWidth() - x, Math.max(1, (int) sel.width()));
+                int h = Math.min(bitmap.getHeight() - y, Math.max(1, (int) sel.height()));
+                Bitmap cropped = Bitmap.createBitmap(bitmap, x, y, w, h);
+                if (cropped != bitmap) bitmap.recycle();
+                bitmap = cropped;
             }
             File file = new File(getCacheDir(), "clipboard-" + System.currentTimeMillis() + ".png");
-            ViewerExports.require(FileOps.saveBitmap(file.getAbsolutePath(), bitmap, 100), "success"); bitmap.recycle();
-            ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
-            clipboard.setPrimaryClip(ClipData.newUri(getContentResolver(), "이미지", ViewerFileProvider.uriForFile(file))); toast("이미지를 복사했어요.");
+            ViewerExports.require(FileOps.saveBitmap(file.getAbsolutePath(), bitmap, 100), "success");
+            bitmap.recycle();
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "이미지", ViewerFileProvider.uriForFile(file)));
+            toast("이미지를 복사했어요.");
         } catch (Exception e) { toast("복사 실패: " + e.getMessage()); }
     }
-    private void pasteClipboardImage() {
-        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
-        ClipData clip = clipboard == null ? null : clipboard.getPrimaryClip();
-        if (clip == null || clip.getItemCount() == 0 || clip.getItemAt(0).getUri() == null) { toast("클립보드에 이미지 파일이 없어요."); return; }
-        openUris(java.util.Collections.singletonList(clip.getItemAt(0).getUri()), Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+    void pasteClipboardImage() {
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        ClipData clip = cm == null ? null : cm.getPrimaryClip();
+        if (clip == null || clip.getItemCount() == 0 || clip.getItemAt(0).getUri() == null) {
+            toast("클립보드에 이미지 파일이 없어요.");
+            return;
+        }
+        openUris(Collections.singletonList(clip.getItemAt(0).getUri()), Intent.FLAG_GRANT_READ_URI_PERMISSION);
     }
-    private void showSettingsDialog() {
-        String version; try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { version = Updater.VERSION; }
-        String[] entries = {"테마", "화면 배치", "JPEG 품질 · " + exportQuality, "PDF 해상도 · " + exportDpi + " dpi", "슬라이드 간격 · " + slideshowIntervalSec + "초", "업데이트 확인"};
-        new AlertDialog.Builder(this).setTitle("뷰어 · " + version).setItems(entries, (d,which) -> {
-            if (which == 0) new AlertDialog.Builder(this).setTitle("테마").setItems(new String[]{"시스템 설정 따르기", "라이트", "다크"}, (dialog,index) -> {
-                prefs.edit().putBoolean("system_theme", index == 0).putBoolean("dark_theme", index == 2).apply();
-                isDarkTheme = index == 0 ? (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES : index == 2;
-                rebuildChromePreserveStage();
-            }).show();
-            else if (which == 1) toggleUiModeManual();
-            else if (which == 2) { final String[] levels = {"70", "80", "90", "95", "100"}; new AlertDialog.Builder(this).setTitle("JPEG 품질").setItems(levels, (dialog,index) -> { exportQuality = Integer.parseInt(levels[index]); prefs.edit().putInt("export_quality", exportQuality).apply(); }).show(); }
-            else if (which == 3) { final String[] levels = {"96", "150", "200", "300"}; new AlertDialog.Builder(this).setTitle("PDF 해상도 (dpi)").setItems(levels, (dialog,index) -> { exportDpi = Integer.parseInt(levels[index]); prefs.edit().putInt("export_dpi", exportDpi).apply(); }).show(); }
-            else if (which == 4) { final String[] levels = {"1", "3", "5", "10", "30"}; new AlertDialog.Builder(this).setTitle("슬라이드 간격 (초)").setItems(levels, (dialog,index) -> { slideshowIntervalSec = Integer.parseInt(levels[index]); prefs.edit().putInt("slide_sec", slideshowIntervalSec).apply(); }).show(); }
-            else { Updater.checkInteractive(this); }
-        }).setPositiveButton("닫기", null).show();
-    }
+
     @Override public boolean onKeyDown(int key, KeyEvent event) {
         if (event.isCtrlPressed()) {
             switch (key) {
                 case KeyEvent.KEYCODE_S: saveCurrentFile(event.isShiftPressed()); return true;
                 case KeyEvent.KEYCODE_O: launchSystemFilePicker(); return true;
                 case KeyEvent.KEYCODE_P: printCurrentFile(); return true;
-                case KeyEvent.KEYCODE_F: toggleSearchBar(); return true;
+                case KeyEvent.KEYCODE_F: onSearch(); return true;
             }
             if (!(getCurrentFocus() instanceof EditText)) {
                 if (key == KeyEvent.KEYCODE_C) { copyCurrentImage(); return true; }
                 if (key == KeyEvent.KEYCODE_V) { pasteClipboardImage(); return true; }
                 if (key == KeyEvent.KEYCODE_Z || key == KeyEvent.KEYCODE_Y) {
                     boolean redo = key == KeyEvent.KEYCODE_Y || event.isShiftPressed();
-                    if ("pdf".equals(currentKind)) undoPdf(redo); else if ("doc".equals(currentKind)) { if (redo) nativeDocView.redo(); else nativeDocView.undo(); } else if (redo) redoImageEdit(); else undoImageEdit(); return true;
+                    if ("pdf".equals(currentKind)) undoPdf(redo);
+                    else if ("doc".equals(currentKind)) { if (redo) nativeDocView.redo(); else nativeDocView.undo(); }
+                    else if (redo) redoImageEdit(); else undoImageEdit();
+                    return true;
                 }
             }
         }
         if (!(getCurrentFocus() instanceof EditText) && (key == KeyEvent.KEYCODE_PAGE_DOWN || key == KeyEvent.KEYCODE_PAGE_UP)) {
             int delta = key == KeyEvent.KEYCODE_PAGE_DOWN ? 1 : -1;
-            if ("pdf".equals(currentKind)) stageCanvasView.setCurrentPdfPage(stageCanvasView.getCurrentPdfPage() + delta); else navigateFile(delta); return true;
+            if ("pdf".equals(currentKind)) stageCanvasView.setCurrentPdfPage(stageCanvasView.getCurrentPdfPage() + delta);
+            else navigateFile(delta);
+            return true;
         }
         return super.onKeyDown(key, event);
     }
-    private void showSavedCopies(File directory,String title) {
-        File[] saved=directory.listFiles(file -> file.isFile() && !FileOps.kindOf(file.getName()).isEmpty());
-        if(saved==null || saved.length==0){new AlertDialog.Builder(this).setTitle(title).setMessage("저장된 파일이 없어요.").setPositiveButton("닫기",null).show();return;}
-        java.util.Arrays.sort(saved,(a,b) -> Long.compare(b.lastModified(),a.lastModified()));
-        String[] names=new String[saved.length];for(int i=0;i<saved.length;i++)names[i]=saved[i].getName();
-        new AlertDialog.Builder(this).setTitle(title).setItems(names,(d,which) -> guardChanges(() -> loadFolderList(directory.getAbsolutePath(),saved[which].getAbsolutePath()))).setNegativeButton("닫기",null).show();
-    }
-    private void closeCurrentFile() {
-        guardChanges(() -> {
-            openTicket++;imageLoadTicket++;searchTicket++;nativeMediaView.stopMedia();PdfHost.closeAll();stageCanvasView.clearContent();stageCanvasView.setActiveTool("hand");
-            currentPath=currentKind="";folderItems.clear();currentFileIndex=-1;searchBarOpen=false;isModified=false;
-            imgUndoStack.clear();imgRedoStack.clear();pdfUndo.clear();pdfRedo.clear();buildCompleteNativeUI();
-        });
-    }
-    private void showTopOverflowMenu(View anchor) {
-        PopupMenu menu=new PopupMenu(this,anchor);boolean opened=!currentPath.isEmpty();
-        menu.getMenu().add(0,2,0,"파일 열기");menu.getMenu().add(0,14,0,"폴더 열기");
-        menu.getMenu().add(0,16,0,"붙여넣기");menu.getMenu().add(0,19,0,"화면 캡처");
-        if(opened){
-            menu.getMenu().add(0,4,0,"저장");menu.getMenu().add(0,5,0,"다른 이름으로 저장·내보내기");
-            menu.getMenu().add(0,15,0,"이미지 복사");menu.getMenu().add(0,6,0,"인쇄");menu.getMenu().add(0,7,0,"공유");
-            menu.getMenu().add(0,8,0,"슬라이드쇼");menu.getMenu().add(0,9,0,"이름 바꾸기");menu.getMenu().add(0,10,0,"삭제");menu.getMenu().add(0,20,0,"파일 닫기");
-        }
-        menu.getMenu().add(0,17,0,"설정");menu.getMenu().add(0,21,0,"최근 캡처");menu.getMenu().add(0,18,0,"원본 백업");
-        menu.getMenu().add(0,3,0,"사진 촬영");menu.getMenu().add(0,13,0,"예제 파일");
-        menu.setOnMenuItemClickListener(item -> {
-            switch(item.getItemId()){
-                case 2:launchSystemFilePicker();break;case 14:chooseFolder();break;case 16:pasteClipboardImage();break;case 19:launchScreenCapture();break;
-                case 4:saveCurrentFile(false);break;case 5:showExportDialog();break;case 15:copyCurrentImage();break;case 6:printCurrentFile();break;case 7:shareCurrentFile();break;
-                case 8:startSlideshow();break;case 9:showRenameDialog();break;case 10:showDeleteConfirmDialog();break;case 20:closeCurrentFile();break;case 17:showSettingsDialog();break;
-                case 18:showSavedCopies(new File(getFilesDir(),"backups"),"원본 백업");break;case 21:showSavedCopies(new File(getFilesDir(),"captures"),"최근 캡처");break;case 3:launchCameraCapture();break;
-                case 13:guardChanges(() -> {SampleSeeder.ensureSeeded(sampleDir);loadFolderList(sampleDir.getAbsolutePath(),null);});break;
-            }
-            return true;
-        });menu.show();
-    }
-    private void showStageQuickMenu() {
-        if (currentPath.isEmpty()) return;
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle(new File(currentPath).getName());
-        String[] items = {
-                "화면에 맞춤 (Fit)",
-                "원본 크기 (100%)",
-                "파일 정보 · EXIF · AI 프롬프트 보기",
-                "내보내기 / 변환",
-                "인쇄 (Print)",
-                "공유 (Share)",
-                "파일 이름 바꾸기",
-                "파일 삭제"
-        };
-        b.setItems(items, new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                switch (which) {
-                    case 0: stageCanvasView.fitToWindow(); break;
-                    case 1: stageCanvasView.setZoom(1.0f); break;
-                    case 2:
-                        infoVisible = true;
-                        updateDrawerAndPanelVisibility();
-                        refreshInfoPanelContent();
-                        break;
-                    case 3: showExportDialog(); break;
-                    case 4: printCurrentFile(); break;
-                    case 5: shareCurrentFile(); break;
-                    case 6: showRenameDialog(); break;
-                    case 7: showDeleteConfirmDialog(); break;
-                }
-            }
-        });
-        b.show();
+
+    private void toast(String msg) {
+        mainHandler.post(() -> Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show());
     }
 
-    private void showRenameDialog() {
-        if (currentPath.isEmpty()) return;
-        final File f = new File(currentPath);
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("파일 이름 바꾸기");
-        final EditText et = new EditText(this);
-        et.setText(f.getName());
-        b.setView(et);
-        b.setPositiveButton("변경", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                String oldPath = currentPath;
-                Map<String, Object> res = documents.rename(currentPath, et.getText().toString().trim());
-                if (Boolean.TRUE.equals(res.get("success"))) {
-                    String newPath = String.valueOf(res.get("path"));
-                    if (isModified) { toast("이름을 변경했어요. 편집 내용은 저장 후 다시 열 수 있어요."); }
-                    for (int index=0;index<folderItems.size();index++) if (folderItems.get(index).path.equals(oldPath)) { File renamed = new File(newPath); folderItems.set(index,new FileEntry(newPath,renamed.getName(),currentKind,renamed.length(),renamed.lastModified())); }
-                    currentPath = newPath; nativeDocView.retarget(newPath);
-                    if ("pdf".equals(currentKind)) { PdfHost.retarget(oldPath,newPath); for (MarkupModel.PdfPageItem page : stageCanvasView.getPdfPages()) if (page.srcPath.equals(oldPath)) page.srcPath = newPath; pdfUndo.clear(); pdfRedo.clear(); lastPdfKey = ""; recordPdfState(); }
-                    updateHeaderTitles(); refreshSidebarContent();
-                    toast("이름을 변경했습니다");
-                } else {
-                    toast("변경 실패: " + res.get("error"));
-                }
-            }
-        });
-        b.setNegativeButton("취소", null);
-        b.show();
-    }
-
-    private void showDeleteConfirmDialog() {
-        if (currentPath.isEmpty()) return;
-        final File f = new File(currentPath);
-        new AlertDialog.Builder(this)
-                .setTitle("파일 삭제")
-                .setMessage("'" + f.getName() + "' 파일을 삭제하시겠습니까?" + (documents.hasSource(currentPath) ? " 원본 위치에서도 삭제되며 되돌릴 수 없습니다." : ""))
-                .setPositiveButton("삭제", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        String dir = f.getParent();
-                        Map<String, Object> res = documents.delete(currentPath);
-                        if (Boolean.TRUE.equals(res.get("success"))) {
-                            isModified = false;
-                            loadFolderList(dir, null);
-                            toast("삭제했습니다");
-                        } else {
-                            toast("삭제 실패: " + res.get("error"));
-                        }
-                    }
-                })
-                .setNegativeButton("취소", null)
-                .show();
-    }
-
-    private static String fmtBytes(long b) {
+    static String fmtBytes(long b) {
         if (b < 1024) return b + " B";
         if (b < 1024 * 1024) return String.format(Locale.US, "%.1f KB", b / 1024.0);
-        return String.format(Locale.US, "%.2f MB", b / (1024.0 * 1024.0));
+        return String.format(Locale.US, "%.1f MB", b / (1024.0 * 1024.0));
     }
 }

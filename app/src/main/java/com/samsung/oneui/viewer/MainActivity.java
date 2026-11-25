@@ -550,6 +550,7 @@ public class MainActivity extends Activity {
         glassHooked = true;
         getWindow().getDecorView().getViewTreeObserver().addOnPreDrawListener(() -> {
             if (stageHostFrame != null && stageHostFrame.isDirty()) {
+                if (topHeaderBar != null) topHeaderBar.invalidate();
                 if (mainPillBar != null) mainPillBar.invalidate();
                 if (subbarContainer != null) subbarContainer.invalidate();
                 if (searchBarOverlay != null) searchBarOverlay.invalidate();
@@ -570,6 +571,7 @@ public class MainActivity extends Activity {
         int textPrimary = isDarkTheme ? 0xFFF1F3F9 : 0xFF15181E;
         int textSecondary = isDarkTheme ? 0xFF9AA3B5 : 0xFF5D6575;
 
+        Ui.init(this, isDarkTheme);
         rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(bgMain);
 
@@ -577,20 +579,20 @@ public class MainActivity extends Activity {
         masterVertical.setOrientation(LinearLayout.VERTICAL);
         rootFrame.addView(masterVertical, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // 1. Top Header Bar
+        // Create stage backdrop FIRST so floating header & bottom toolbars refract live content
+        stageHostFrame = new Glass.Backdrop(this);
+        stageHostFrame.setBackgroundColor(isDarkTheme ? 0xFF0B0D12 : 0xFFE9EDF4);
+        emptyWelcomeView = null;
+
+        // 1. Top Header Bar (Tablet: docked top bar; Mobile: floating Liquid Glass pill over stage)
         topHeaderBar = buildTopHeaderBar(bgSurface, borderCol, textPrimary, textSecondary);
-        masterVertical.addView(topHeaderBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(isTabletLayout ? 54 : 52)));
+        if (isTabletLayout) {
+            masterVertical.addView(topHeaderBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+        }
 
         // 2. Middle Workspace Area
         workspaceFrame = new FrameLayout(this);
         masterVertical.addView(workspaceFrame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        // Stage Host + Empty Welcome View
-        // the stage is the glass backdrop: toolbars over / beside it refract what is on screen (Prism glass)
-        Ui.init(this, isDarkTheme);
-        stageHostFrame = new Glass.Backdrop(this);
-        stageHostFrame.setBackgroundColor(isDarkTheme ? 0xFF0B0D12 : 0xFFE9EDF4);
-        emptyWelcomeView = null;
 
         // Sidebar & Info Panel
         sidebarContainer = buildSidebarView(bgSurface, borderCol, textPrimary, textSecondary);
@@ -655,6 +657,14 @@ public class MainActivity extends Activity {
 
             workspaceFrame.addView(stageHostFrame, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+            // Floating Prism Liquid Glass Top Pill on Mobile
+            FrameLayout.LayoutParams thLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+            thLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+            thLp.topMargin = dp(8);
+            thLp.leftMargin = dp(10);
+            thLp.rightMargin = dp(10);
+            workspaceFrame.addView(topHeaderBar, thLp);
+
             FrameLayout.LayoutParams ftLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             ftLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
             ftLp.leftMargin = dp(10);
@@ -714,7 +724,7 @@ public class MainActivity extends Activity {
                 int[] at = new int[2]; workspaceFrame.getLocationInWindow(at);
                 stageParams.height = Math.max(dp(120), foldBounds.top - at[1] - dp(8));
                 stageParams.bottomMargin = 0;
-            } else { stageParams.height = ViewGroup.LayoutParams.MATCH_PARENT; stageParams.bottomMargin = floatingToolbarHost.getVisibility() == View.VISIBLE ? b - t + dp(24) : 0; }
+            } else { stageParams.height = ViewGroup.LayoutParams.MATCH_PARENT; stageParams.bottomMargin = 0; }
             if (oldHeight != stageParams.height || oldMargin != stageParams.bottomMargin) stageHostFrame.setLayoutParams(stageParams);
         });
         attachActiveStageView();
@@ -723,40 +733,86 @@ public class MainActivity extends Activity {
         hookGlassRefresh();
     }
 
+    private List<File> collectRecentFiles() {
+        List<File> out = new ArrayList<>();
+        File[] dirs = new File[]{inboxDir, sampleDir};
+        for (File d : dirs) {
+            if (d == null || !d.isDirectory()) continue;
+            File[] fs = d.listFiles();
+            if (fs == null) continue;
+            for (File f : fs) if (f.isFile() && f.length() > 0) out.add(f);
+        }
+        Collections.sort(out, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        return out;
+    }
+
+    private void createBlankSketch() {
+        try {
+            if (inboxDir != null) inboxDir.mkdirs();
+            File f = new File(inboxDir != null ? inboxDir : getCacheDir(), "sketch_" + System.currentTimeMillis() + ".png");
+            Bitmap bmp = Bitmap.createBitmap(1440, 1920, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(bmp);
+            c.drawColor(Color.WHITE);
+            try (FileOutputStream fos = new FileOutputStream(f)) {
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, fos);
+            }
+            bmp.recycle();
+            openFileUnchecked(f.getAbsolutePath());
+            mainHandler.post(() -> setTool("markup"));
+        } catch (Exception e) {
+            toast("빈 스케치 생성 실패: " + e.getMessage());
+        }
+    }
+
     private void buildWelcomeWorkspace() {
         applySystemBarColors();
         sidebarVisible = infoVisible = false;
         sidebarContainer = sidebarListContainer = sidebarPdfActionRow = infoPanelContainer = infoContentBody = null;
         floatingToolbarHost = mainPillBar = subbarContainer = searchBarOverlay = statusBarContainer = null;
         statusLeftText = statusCenterText = statusRightText = null; mobileScrimView = null; slideshowOverlay = null;
-        int ink = isDarkTheme ? 0xFFF0F4F1 : 0xFF19221F;
+        int ink = isDarkTheme ? 0xFFF4F6FA : 0xFF111318;
+        int bgCol = isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8;
+        Ui.init(this, isDarkTheme);
         rootFrame = new FrameLayout(this); rootFrame.setTag("welcome-root");
-        rootFrame.setBackgroundColor(isDarkTheme ? 0xFF171C1A : 0xFFF2F3F5);
+        rootFrame.setBackgroundColor(bgCol);
         LinearLayout column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
         rootFrame.addView(column, new FrameLayout.LayoutParams(-1,-1));
-        topHeaderBar = new LinearLayout(this); topHeaderBar.setOrientation(LinearLayout.VERTICAL); topHeaderBar.setPadding(dp(16),dp(10),dp(16),dp(12));
-        headerTitleView = new TextView(this); headerTitleView.setText("Samsung Viewer"); headerTitleView.setTextColor(ink);
-        headerTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP,18); headerTitleView.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL));
-        headerTitleView.setPadding(0,dp(2),0,dp(10)); topHeaderBar.addView(headerTitleView);
-        if(getResources().getConfiguration().screenHeightDp<500 && getResources().getConfiguration().screenWidthDp>=600)headerTitleView.setVisibility(View.GONE);
+
+        // Backdrop wraps the start browser so the top floating Prism pill refracts live content
+        stageHostFrame = new Glass.Backdrop(this);
+        stageHostFrame.setTag("welcome-workspace");
+        stageHostFrame.setBackgroundColor(bgCol);
+
+        topHeaderBar = new LinearLayout(this); topHeaderBar.setOrientation(LinearLayout.HORIZONTAL);
+        topHeaderBar.setGravity(Gravity.CENTER_VERTICAL);
+        topHeaderBar.setPadding(dp(18), dp(12), dp(14), dp(8));
+        headerTitleView = new TextView(this); headerTitleView.setText("뷰어"); headerTitleView.setTextColor(ink);
+        headerTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26); headerTitleView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        topHeaderBar.addView(headerTitleView, new LinearLayout.LayoutParams(0, -2, 1f));
         headerSubView = new TextView(this); headerSubView.setVisibility(View.GONE);
-        LinearLayout pill = new LinearLayout(this); pill.setTag("welcome-toolbar"); pill.setGravity(Gravity.CENTER_VERTICAL); pill.setPadding(dp(6),dp(5),dp(6),dp(5));
-        Ui.init(this, isDarkTheme);
-        pill.setBackground(Glass.shadersOk ? GlassDrawable.bar(null, isDarkTheme ? 0xFF171C1A : 0xFFF2F3F5, dp(32)) : WelcomeView.surface(isDarkTheme ? 0xFF2A302D : Color.WHITE,dp(32),0)); pill.setElevation(dp(3));
-        pill.addView(createIconBtn("menu","메뉴",ink,v -> showTopOverflowMenu(v)));
+
+        LinearLayout pill = new LinearLayout(this); pill.setTag("welcome-toolbar"); pill.setGravity(Gravity.CENTER_VERTICAL); pill.setPadding(dp(4), dp(2), dp(4), dp(2));
+        GlassDrawable pillGlass = GlassDrawable.bar((Glass.Backdrop) stageHostFrame, bgCol, dp(26));
+        pill.setBackground(Glass.shadersOk ? pillGlass : WelcomeView.surface(isDarkTheme ? 0xFF1E222B : Color.WHITE, dp(26), 0));
+        pill.setElevation(dp(3));
+        pill.setClipToOutline(true);
+        if (Glass.shadersOk) pillGlass.attachTouch(pill);
         pill.addView(createIconBtn("open","파일 열기",ink,v -> launchSystemFilePicker()));
-        View save = createIconBtn("save","저장",ink,v -> saveCurrentFile(false)); save.setEnabled(false); save.setAlpha(.3f); pill.addView(save);
-        topHeaderBar.addView(pill,new LinearLayout.LayoutParams(-2,-2)); column.addView(topHeaderBar,new LinearLayout.LayoutParams(-1,-2));
-        workspaceFrame = new FrameLayout(this); column.addView(workspaceFrame,new LinearLayout.LayoutParams(-1,0,1));
-        stageHostFrame = new FrameLayout(this); stageHostFrame.setTag("welcome-workspace");
-        stageHostFrame.setBackground(WelcomeView.surface(isDarkTheme ? 0xFF202623 : 0xFFE8EAEC,dp(26),isDarkTheme ? 0xFF343E38 : 0xFFD4D8DB)); stageHostFrame.setClipToOutline(true);
-        FrameLayout.LayoutParams workspace = new FrameLayout.LayoutParams(-1,-1); workspace.setMargins(dp(12),0,dp(12),dp(12)); workspaceFrame.addView(stageHostFrame,workspace);
-        emptyWelcomeView = new WelcomeView(this,isDarkTheme,new WelcomeView.Actions() {
+        pill.addView(createIconBtn("markup","빈 스케치",ink,v -> createBlankSketch()));
+        pill.addView(createIconBtn("menu","메뉴",ink,v -> showTopOverflowMenu(v)));
+        topHeaderBar.addView(pill, new LinearLayout.LayoutParams(-2, -2));
+        column.addView(topHeaderBar, new LinearLayout.LayoutParams(-1, -2));
+
+        workspaceFrame = new FrameLayout(this); column.addView(workspaceFrame, new LinearLayout.LayoutParams(-1, 0, 1));
+        workspaceFrame.addView(stageHostFrame, new FrameLayout.LayoutParams(-1, -1));
+        emptyWelcomeView = new WelcomeView(this, isDarkTheme, new WelcomeView.Actions() {
             public void open() { launchSystemFilePicker(); }
             public void paste() { pasteClipboardImage(); }
             public void capture() { launchScreenCapture(); }
-        });
-        stageHostFrame.addView(emptyWelcomeView,new FrameLayout.LayoutParams(-1,-1));
+            public void newSketch() { createBlankSketch(); }
+            public void openFile(File file) { if (file != null && file.exists()) openFileUnchecked(file.getAbsolutePath()); }
+        }, collectRecentFiles());
+        stageHostFrame.addView(emptyWelcomeView, new FrameLayout.LayoutParams(-1, -1));
         stageHostFrame.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> fitWelcomeAroundFold());
         installRootLayout();
     }
@@ -814,9 +870,11 @@ public class MainActivity extends Activity {
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(isTabletLayout ? 8 : 12), 0, dp(isTabletLayout ? 8 : 12), 0);
         if (!isTabletLayout && stageHostFrame instanceof Glass.Backdrop) {
-            bar.setBackground(GlassDrawable.bar((Glass.Backdrop) stageHostFrame, isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8, dp(26)));
+            GlassDrawable hdrGlass = GlassDrawable.bar((Glass.Backdrop) stageHostFrame, isDarkTheme ? 0xFF0E1015 : 0xFFF2F4F8, dp(26));
+            bar.setBackground(hdrGlass);
             bar.setElevation(dp(4));
             bar.setClipToOutline(true);
+            hdrGlass.attachTouch(bar);
         } else {
             GradientDrawable gd = new GradientDrawable();
             gd.setColor(bgSurface);
@@ -858,7 +916,7 @@ public class MainActivity extends Activity {
         headerTitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
 
         headerSubView = new TextView(this);
-        headerSubView.setText("9.5.0");
+        headerSubView.setText("9.5.1");
         headerSubView.setTextColor(textSecondary);
         headerSubView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
         headerSubView.setSingleLine(true);
@@ -1307,8 +1365,10 @@ public class MainActivity extends Activity {
         iv.setPadding(pad, pad, pad, pad);
         iv.setImageDrawable(VectorIcons.create(this, iconName, 20f, tintColor));
         iv.setContentDescription(contentDesc);
-        iv.setMinimumWidth(dp(48)); iv.setMinimumHeight(dp(48));
+        iv.setMinimumWidth(dp(44)); iv.setMinimumHeight(dp(44));
+        iv.setBackground(null);
         iv.setOnClickListener(listener);
+        GlassDrawable.attachRecoil(iv);
         return iv;
     }
 
@@ -1355,8 +1415,10 @@ public class MainActivity extends Activity {
         if(currentPath.isEmpty() || "media".equals(currentKind)){floatingToolbarHost.setVisibility(View.GONE);return;}
         floatingToolbarHost.setVisibility(View.VISIBLE);
         mainPillBar.setTag("editor-toolbar");mainPillBar.setPadding(dp(8),dp(4),dp(8),dp(4));
-        mainPillBar.setBackground(glassOr(WelcomeView.surface(isDarkTheme?0xF228302C:0xF2FFFFFF,dp(26),isDarkTheme?0xFF38443D:0xFFD4DDD8),false,dp(26)));mainPillBar.setElevation(dp(3));
-        int ink=isDarkTheme?0xFFF1F4F2:0xFF202A25;
+        android.graphics.drawable.Drawable pillBg = glassOr(WelcomeView.surface(isDarkTheme?0xE61C2029:0xE8FFFFFF,dp(28),isDarkTheme?0x33FFFFFF:0x22000000),false,dp(28));
+        mainPillBar.setBackground(pillBg);mainPillBar.setElevation(dp(4));mainPillBar.setClipToOutline(true);
+        if (pillBg instanceof GlassDrawable) ((GlassDrawable) pillBg).attachTouch(mainPillBar);
+        int ink=isDarkTheme?0xFFF4F6FA:0xFF15181E;
         if("doc".equals(currentKind)) {
             addEditorAction("menu","도구",false,ink,v -> showEditorTools(v));
             View edit=addEditorAction("pen","편집",nativeDocView.isEditing(),ink,v -> {nativeDocView.setEditing(!nativeDocView.isEditing());refreshToolbars();});edit.setEnabled(nativeDocView.canEdit());edit.setAlpha(edit.isEnabled()?1:.35f);
@@ -1376,36 +1438,41 @@ public class MainActivity extends Activity {
     }
     private View addEditorAction(String icon,String label,boolean active,int ink,View.OnClickListener action) {
         LinearLayout button=new LinearLayout(this);button.setOrientation(LinearLayout.VERTICAL);button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(2),dp(7),dp(2),dp(7));button.setMinimumHeight(dp(60));button.setMinimumWidth(dp(48));
+        button.setPadding(dp(4),dp(7),dp(4),dp(7));button.setMinimumHeight(dp(56));button.setMinimumWidth(dp(48));
         button.setTag("editor-"+icon);button.setContentDescription(label);button.setFocusable(true);button.setOnClickListener(action);
-        int fill=active?WelcomeView.ACCENT:Color.TRANSPARENT;
-        button.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x2255B499),WelcomeView.surface(fill,dp(20),0),null));
-        ImageView image=new ImageView(this);image.setImageDrawable(VectorIcons.create(this,icon,22,active?Color.WHITE:ink));
-        button.addView(image,new LinearLayout.LayoutParams(dp(22),dp(22)));
-        TextView caption=new TextView(this);caption.setText(label);caption.setTextColor(active?Color.WHITE:ink);caption.setTextSize(10);caption.setGravity(Gravity.CENTER);caption.setMaxLines(2);caption.setPadding(0,dp(3),0,0);
+        // No opaque solid fill inside liquid glass: subtle translucent tint when active, completely clear when idle
+        int activeTint = isDarkTheme ? 0x38387AFF : 0x22387AFF;
+        button.setBackground(active ? WelcomeView.surface(activeTint, dp(22), 0) : null);
+        GlassDrawable.attachRecoil(button);
+        int fg = active ? WelcomeView.ACCENT : ink;
+        ImageView image=new ImageView(this);image.setImageDrawable(VectorIcons.create(this,icon,21,fg));
+        button.addView(image,new LinearLayout.LayoutParams(dp(21),dp(21)));
+        TextView caption=new TextView(this);caption.setText(label);caption.setTextColor(fg);caption.setTextSize(10.5f);caption.setGravity(Gravity.CENTER);caption.setMaxLines(1);caption.setPadding(0,dp(3),0,0);
+        if (active) caption.setTypeface(Typeface.DEFAULT_BOLD);
         button.addView(caption,new LinearLayout.LayoutParams(-1,-2));mainPillBar.addView(button,new LinearLayout.LayoutParams(0,-2,1));return button;
     }
     private void showEditorTools(View anchor) {
         PopupMenu menu=new PopupMenu(this,anchor);
         if("image".equals(currentKind)) {
-            String[] labels={"이동","영역 선택","자르기","크기 조절","색상 보정","배경 지우기","왼쪽으로 회전","오른쪽으로 회전","좌우 뒤집기","상하 뒤집기","투명 배경 격자","다시 실행"};
+            String[] labels={"이동","영역 선택","자르기","크기 조절","색상 보정","배경 지우기","서명 삽입","왼쪽으로 회전","오른쪽으로 회전","좌우 뒤집기","상하 뒤집기","투명 배경 격자","빈 스케치 새로 만들기","다시 실행"};
             for(int i=0;i<labels.length;i++)menu.getMenu().add(0,100+i,i,labels[i]);
         }else if("pdf".equals(currentKind)) {
-            String[] labels={"화면에 맞추기","연속 보기","한 페이지","두 페이지","페이지 관리","왼쪽으로 회전","오른쪽으로 회전","다시 실행"};
+            String[] labels={"화면에 맞추기","연속 보기","한 페이지","두 페이지","페이지 관리","서명 삽입","왼쪽으로 회전","오른쪽으로 회전","다시 실행"};
             for(int i=0;i<labels.length;i++)menu.getMenu().add(0,200+i,i,labels[i]);
         }else {
             menu.getMenu().add(0,303,0,"기본 크기");menu.getMenu().add(0,300,1,"글자 확대");menu.getMenu().add(0,301,2,"글자 축소");menu.getMenu().add(0,302,3,"다시 실행");
         }
-        menu.getMenu().add(0,10,90,"이전 파일");menu.getMenu().add(0,11,91,"다음 파일");menu.getMenu().add(0,12,92,bookmarks.contains(currentPath)?"책갈피 해제":"책갈피 추가");
+        menu.getMenu().add(0,13,89,"문서 검사기 (정보)");menu.getMenu().add(0,10,90,"이전 파일");menu.getMenu().add(0,11,91,"다음 파일");menu.getMenu().add(0,12,92,bookmarks.contains(currentPath)?"책갈피 해제":"책갈피 추가");
         menu.setOnMenuItemClickListener(item -> {
             switch(item.getItemId()) {
                 case 100:setTool("hand");break;case 101:setTool("select");break;case 102:setTool("crop");break;case 103:showResizeImageDialog();break;case 104:setTool("adjust");break;case 105:setTool("alpha");break;
-                case 106:rotateCurrentImage(-90);break;case 107:rotateCurrentImage(90);break;case 108:flipCurrentImage(true,false);break;case 109:flipCurrentImage(false,true);break;
-                case 110:stageCanvasView.setShowChecker(!stageCanvasView.isShowChecker());break;case 111:redoImageEdit();break;
+                case 106:showSignatureDialog(0.5f, 0.5f, 0);break;case 107:rotateCurrentImage(-90);break;case 108:rotateCurrentImage(90);break;case 109:flipCurrentImage(true,false);break;case 110:flipCurrentImage(false,true);break;
+                case 111:stageCanvasView.setShowChecker(!stageCanvasView.isShowChecker());break;case 112:createBlankSketch();break;case 113:redoImageEdit();break;
                 case 200:stageCanvasView.fitToWindow();break;case 201:stageCanvasView.setPdfViewMode("cont");break;case 202:stageCanvasView.setPdfViewMode("single");break;case 203:stageCanvasView.setPdfViewMode("two");break;
-                case 204:showPdfPageOrganizeDialog();break;case 205:rotateCurrentPdfPage(-90);break;case 206:rotateCurrentPdfPage(90);break;case 207:undoPdf(true);break;
+                case 204:showPdfPageOrganizeDialog();break;case 205:showSignatureDialog(0.5f, 0.5f, stageCanvasView.getCurrentPdfPage());break;case 206:rotateCurrentPdfPage(-90);break;case 207:rotateCurrentPdfPage(90);break;case 208:undoPdf(true);break;
                 case 300:nativeDocView.setZoomScale(nativeDocView.getZoomScale()+.15f);break;case 301:nativeDocView.setZoomScale(nativeDocView.getZoomScale()-.15f);break;case 302:nativeDocView.redo();break;
                 case 303:nativeDocView.setZoomScale(1);break;
+                case 13:infoVisible=!infoVisible;updateDrawerAndPanelVisibility();if(infoVisible)refreshInfoPanelContent();break;
                 case 10:navigateFile(-1);break;case 11:navigateFile(1);break;case 12:toggleBookmark(currentPath);break;
             }
             refreshToolbars();return true;
@@ -1423,12 +1490,16 @@ public class MainActivity extends Activity {
         subbarContainer.setVisibility(View.VISIBLE);
 
         GradientDrawable sbBg = new GradientDrawable();
-        sbBg.setColor(isDarkTheme ? 0xEE1A1E29 : 0xF5FFFFFF);
-        sbBg.setCornerRadius(dp(20));
-        sbBg.setStroke(dp(1), isDarkTheme ? 0xFF2E3547 : 0xFFD0D8E8);
-        subbarContainer.setBackground(glassOr(sbBg, false, dp(20)));
-        subbarContainer.setElevation(dp(3));
+        sbBg.setColor(isDarkTheme ? 0xE61C2029 : 0xE8FFFFFF);
+        sbBg.setCornerRadius(dp(22));
+        sbBg.setStroke(dp(1), isDarkTheme ? 0x33FFFFFF : 0x22000000);
+        android.graphics.drawable.Drawable sbGlass = glassOr(sbBg, false, dp(22));
+        subbarContainer.setBackground(sbGlass);
+        subbarContainer.setElevation(dp(4));
+        subbarContainer.setClipToOutline(true);
         subbarContainer.setPadding(dp(10), dp(6), dp(10), dp(6));
+        if (sbGlass instanceof GlassDrawable) ((GlassDrawable) sbGlass).attachTouch(subbarContainer);
+        GlassDrawable.popIn(subbarContainer);
 
         HorizontalScrollView hsv = new HorizontalScrollView(this);
         hsv.setHorizontalScrollBarEnabled(false);

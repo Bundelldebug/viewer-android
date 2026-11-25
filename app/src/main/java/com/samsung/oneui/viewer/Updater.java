@@ -29,7 +29,7 @@ final class Updater {
     private Updater() {}
 
     static final String REPO = "Bundelldebug/viewer-android";
-    static final String VERSION = "9.5.0";
+    static final String VERSION = "9.5.1";
     private static final long DAY = 24L * 60 * 60 * 1000;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static long pending = -1;

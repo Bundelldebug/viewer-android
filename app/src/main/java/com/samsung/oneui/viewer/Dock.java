@@ -95,8 +95,8 @@ final class Dock extends FrameLayout {
     private final Object contentNodeObj; // RenderNode on API 29+
 
     // Exact Prism spring physics
-    final Ui.Spring lensX = new Ui.Spring(420f, 0.72f, 0.4f);
-    final Ui.Spring lift = new Ui.Spring(560f, 0.78f, 0.002f);
+    final Ui.Spring lensX = new Ui.Spring(380f, 0.98f, 0.4f);
+    final Ui.Spring lift = new Ui.Spring(460f, 1.0f, 0.002f);
     final Ui.Spring miniPress = new Ui.Spring(700f, 0.9f, 0.002f);
     final Ui.Spring searchPress = new Ui.Spring(640f, 0.76f, 0.002f);
     final Ui.Spring barPress = new Ui.Spring(520f, 0.85f, 0.002f);

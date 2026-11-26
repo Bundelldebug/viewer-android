@@ -241,17 +241,19 @@ final class Header extends View {
             boolean onTablet = Dock.tabletFor(rw, rh);
             float rightBound = pill.isEmpty() ? w - Ui.dpf(16) : pill.left - Ui.dpf(12);
             if (onTablet) {
-                float maxTabLeft = Math.max(titleX + Ui.dpf(80), (w - Math.min(rw * 0.42f, Ui.dpf(440)) - Ui.dpf(92)) / 2f - Ui.dpf(10));
+                float maxTabLeft = (w - Math.min(rw * 0.42f, Ui.dpf(440)) - Ui.dpf(92)) / 2f - Ui.dpf(12);
                 rightBound = Math.min(rightBound, maxTabLeft);
             }
-            float avail = Math.max(Ui.dpf(40), rightBound - titleX);
-            float rowCy = vertical ? pill.top + Ui.dpf(23) : (pill.isEmpty() ? backRect.centerY() : pill.centerY());
-            float ts = Ui.gStyle ? (onTablet ? 18f : 20f) : 17f;
-            titlePaint.setTextSize(Ui.sp(ts));
-            while (ts > 13f && titlePaint.measureText(title) > avail) { ts -= 1f; titlePaint.setTextSize(Ui.sp(ts)); }
-            CharSequence t = TextUtils.ellipsize(title, titlePaint, avail, TextUtils.TruncateAt.END);
-            float baseline = rowCy + titlePaint.getTextSize() * 0.36f;
-            c.drawText(t, 0, t.length(), titleX, baseline - Ui.dpf(3) * (1f - titleAlpha), titlePaint);
+            float avail = rightBound - titleX;
+            if (avail >= Ui.dpf(44)) {
+                float rowCy = vertical ? pill.top + Ui.dpf(23) : (pill.isEmpty() ? backRect.centerY() : pill.centerY());
+                float ts = Ui.gStyle ? (onTablet ? 18f : 20f) : 17f;
+                titlePaint.setTextSize(Ui.sp(ts));
+                while (ts > 13f && titlePaint.measureText(title) > avail) { ts -= 1f; titlePaint.setTextSize(Ui.sp(ts)); }
+                CharSequence t = TextUtils.ellipsize(title, titlePaint, avail, TextUtils.TruncateAt.END);
+                float baseline = rowCy + titlePaint.getTextSize() * 0.36f;
+                c.drawText(t, 0, t.length(), titleX, baseline - Ui.dpf(3) * (1f - titleAlpha), titlePaint);
+            }
         }
 
         // Right-hand Liquid Glass action pill with press-to-expand + touch glow

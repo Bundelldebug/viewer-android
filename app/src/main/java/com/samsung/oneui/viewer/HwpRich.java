@@ -157,7 +157,7 @@ final class HwpRich {
             cs.color = normHexColor(Docs.attr(cp, "textColor"), false);
             String shade = Docs.attr(cp, "shadeColor");
             if (shade != null && !"none".equalsIgnoreCase(shade) && !"#FFFFFFFF".equalsIgnoreCase(shade) && !"#FFFFFF".equalsIgnoreCase(shade)) {
-                cs.bgColor = normHexColor(shade, true);
+                cs.bgColor = normHexColor(shade, true, true);
             }
             cs.bold = Docs.kid(cp, "bold") != null;
             cs.italic = Docs.kid(cp, "italic") != null;
@@ -213,14 +213,14 @@ final class HwpRich {
                 if (wb != null) {
                     String fc = Docs.attr(wb, "faceColor");
                     if (fc != null && !"none".equalsIgnoreCase(fc)) {
-                        bs.bgColor = normHexColor(fc, true);
+                        bs.bgColor = normHexColor(fc, true, true);
                     }
                 }
                 if (bs.bgColor == null) {
                     Element grad = Docs.find(fill, "gradation");
                     if (grad != null) {
                         Element col = Docs.find(grad, "color");
-                        if (col != null) bs.bgColor = normHexColor(Docs.attr(col, "value"), true);
+                        if (col != null) bs.bgColor = normHexColor(Docs.attr(col, "value"), true, true);
                     }
                 }
                 Element imgBrush = Docs.find(fill, "imgBrush");
@@ -430,7 +430,7 @@ final class HwpRich {
         Element fill = Docs.kid(box, "fillBrush");
         if (fill != null) {
             Element wb = Docs.find(fill, "winBrush");
-            if (wb != null) bg = normHexColor(Docs.attr(wb, "faceColor"), true);
+            if (wb != null) bg = normHexColor(Docs.attr(wb, "faceColor"), true, true);
             Element ib = Docs.find(fill, "imgBrush");
             if (ib != null) {
                 Element im = Docs.find(ib, "img");
@@ -686,12 +686,12 @@ final class HwpRich {
                 bs.hasAnyBorder = vis > 0;
                 bs.hasBorder = vis >= 2;
                 bs.borderColor = bCol != null ? bCol : "#9AA5B4";
-                // Fill info starts after diagonal border (4+1+1+4 = offset 34? Standard: 2+4+4+16+1+1+4 = 32 -> Wait: 2(prop)+4(type)+4(width)+16(color)+1(diagType)+1(diagThick)+4(diagColor) = 32, fillType at 32)
+                // Fill info starts at offset 32 (prop 2 + types 4 + widths 4 + colors 16 + diag 6 = 32)
                 if (d.length >= 44) {
                     int fillType = le32(d, 32);
-                    if ((fillType & 1) != 0) { // Solid pattern fill: faceColor at 36
+                    if ((fillType & 1) != 0) { // Solid pattern fill: backColor at 36
                         int face = le32(d, 36);
-                        bs.bgColor = colorRefToHex(face, true);
+                        bs.bgColor = colorRefToHex(face, true, true);
                     }
                 }
                 info.borderFills.add(bs);
@@ -705,11 +705,12 @@ final class HwpRich {
                 cs.bold = (attr & 2) != 0;
                 cs.underline = ((attr >>> 2) & 3) != 0;
                 cs.strike = ((attr >>> 18) & 7) != 0;
-                cs.color = colorRefToHex(le32(d, 52), false);
-                if (d.length >= 60) {
-                    int shade = le32(d, 56);
-                    if (shade != -1 && (shade & 0xFFFFFF) != 0xFFFFFF) {
-                        cs.bgColor = colorRefToHex(shade, true);
+                cs.color = colorRefToHex(le32(d, 52), false, false);
+                // Offset 56 is underlineColor (defaults to 0x00000000 black!); offset 60 is shadeColor (0xFFFFFFFF = none)
+                if (d.length >= 64) {
+                    int shade = le32(d, 60);
+                    if (shade != -1 && shade != 0 && (shade & 0xFFFFFF) != 0xFFFFFF && (shade & 0xFFFFFF) != 0) {
+                        cs.bgColor = colorRefToHex(shade, true, true);
                     }
                 }
                 info.charShapes.add(cs);
@@ -1146,13 +1147,21 @@ final class HwpRich {
     }
 
     private static String normHexColor(String s, boolean skipWhite) {
+        return normHexColor(s, skipWhite, false);
+    }
+
+    private static String normHexColor(String s, boolean skipWhite, boolean skipDefaultBlack) {
         if (s == null) return null;
         s = s.trim();
         if (s.isEmpty() || "none".equalsIgnoreCase(s)) return null;
         if (s.startsWith("#")) s = s.substring(1);
-        if (s.length() == 8) s = s.substring(2); // strip alpha AARRGGBB -> RRGGBB
+        if (s.length() == 8) {
+            if (s.startsWith("00")) return null; // fully transparent AARRGGBB
+            s = s.substring(2);
+        }
         if (s.length() != 6) return null;
         if (skipWhite && "FFFFFF".equalsIgnoreCase(s)) return null;
+        if (skipDefaultBlack && "000000".equalsIgnoreCase(s)) return null;
         for (int i = 0; i < 6; i++) {
             char c = s.charAt(i);
             if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return null;
@@ -1161,9 +1170,15 @@ final class HwpRich {
     }
 
     private static String colorRefToHex(int c, boolean skipWhite) {
+        return colorRefToHex(c, skipWhite, false);
+    }
+
+    private static String colorRefToHex(int c, boolean skipWhite, boolean skipDefaultBlack) {
         if (c == -1) return null;
+        if (skipDefaultBlack && (c == 0 || (c & 0xFFFFFF) == 0)) return null;
         int r = c & 0xFF, g = (c >>> 8) & 0xFF, b = (c >>> 16) & 0xFF;
         if (skipWhite && r >= 252 && g >= 252 && b >= 252) return null;
+        if (skipDefaultBlack && r <= 8 && g <= 8 && b <= 8) return null;
         return String.format(Locale.ROOT, "#%02X%02X%02X", r, g, b);
     }
 

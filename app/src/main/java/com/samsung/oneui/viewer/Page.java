@@ -52,7 +52,11 @@ abstract class Page extends FrameLayout {
 
     void applyInsets() {
         int top = Ui.statusInset + Ui.dp(largeTop() ? 64 : 60);
-        content.setPadding(0, top, main.sideInset(), main.bottomPadding());
+        int right = main.sideInset();
+        int bot = main.bottomPadding();
+        if (content.getPaddingTop() != top || content.getPaddingRight() != right || content.getPaddingBottom() != bot) {
+            content.setPadding(0, top, right, bot);
+        }
     }
 
     boolean largeTop() { return true; }

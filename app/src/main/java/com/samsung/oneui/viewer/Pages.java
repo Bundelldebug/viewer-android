@@ -288,11 +288,28 @@ final class Pages {
         }
 
         @Override void applyInsets() {
-            if (subToolHost == null) return;
-            LayoutParams lp = (LayoutParams) subToolHost.getLayoutParams();
-            if (lp != null) {
-                lp.topMargin = Ui.statusInset + Ui.dp(68);
-                subToolHost.setLayoutParams(lp);
+            int topSafe = Ui.statusInset + Ui.dp(68);
+            int botSafe = main.bottomPadding();
+            int rightSafe = main.sideInset();
+            if (emptyOverlay != null) {
+                int pL = Ui.dp(28), pT = topSafe + Ui.dp(16), pR = Ui.dp(28) + rightSafe, pB = botSafe + Ui.dp(16);
+                if (emptyOverlay.getPaddingTop() != pT || emptyOverlay.getPaddingRight() != pR || emptyOverlay.getPaddingBottom() != pB) {
+                    emptyOverlay.setPadding(pL, pT, pR, pB);
+                }
+            }
+            if (subToolHost != null) {
+                LayoutParams lp = (LayoutParams) subToolHost.getLayoutParams();
+                int wantR = Ui.dp(14) + rightSafe;
+                if (lp != null && (lp.topMargin != topSafe || lp.rightMargin != wantR)) {
+                    lp.topMargin = topSafe;
+                    lp.leftMargin = Ui.dp(14);
+                    lp.rightMargin = wantR;
+                    subToolHost.setLayoutParams(lp);
+                }
+            }
+            if (main.nativeDocView != null) {
+                int extraSub = (subToolHost != null && subToolHost.getVisibility() == VISIBLE) ? Ui.dp(50) : 0;
+                main.nativeDocView.setSafeInsets(topSafe + extraSub, botSafe, rightSafe);
             }
         }
 

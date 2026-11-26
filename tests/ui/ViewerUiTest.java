@@ -139,6 +139,23 @@ public class ViewerUiTest {
         throw new AssertionError("DragEvent factory missing");
     }
 
+    @Test public void hwp5CharShapeNeverPaintsBlackBackgroundAndDocHasSafeInsets() throws Exception {
+        // Verify HWP 5.0 HWPTAG_CHAR_SHAPE with underlineColor=0x00000000 (offset 56) & shadeColor=0xFFFFFFFF (offset 60)
+        // does NOT emit background-color:#000000!
+        java.lang.reflect.Method parseDocInfo = HwpRich.class.getDeclaredMethod("colorRefToHex", int.class, boolean.class, boolean.class);
+        parseDocInfo.setAccessible(true);
+        assertNull(parseDocInfo.invoke(null, 0x00000000, true, true));
+        assertNull(parseDocInfo.invoke(null, 0xFFFFFFFF, true, true));
+        assertEquals("#E8F0FE", parseDocInfo.invoke(null, 0x00FEF0E8, true, true));
+
+        ActivityController<MainActivity> c = launch(360, 800);
+        MainActivity a = c.get();
+        a.applyAllPageInsets();
+        assertTrue("Document top safe inset clears header", a.nativeDocView.getSafeTopPx() >= 60);
+        assertTrue("Document bottom safe inset clears floating dock", a.nativeDocView.getSafeBottomPx() >= 80);
+        c.pause().stop().destroy();
+    }
+
     @Test public void coldStartPhoneHasEmptyWorkspaceAndNativeOpen() throws Exception {
         ActivityController<MainActivity> c = launch(360, 800);
         MainActivity a = c.get();

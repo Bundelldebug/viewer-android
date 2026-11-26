@@ -4,9 +4,9 @@
     "nativeGraphics":  true,
     "androidApi":  34,
     "physicalDevice":  false,
-    "tests":  22,
+    "tests":  23,
     "passed":  true,
-    "checkedAt":  "2026-11-26T17:51:57.1826796+09:00",
+    "checkedAt":  "2026-11-26T20:13:52.7686067+09:00",
     "screenshots":  [
                         "editor-320.png",
                         "editor-840.png",

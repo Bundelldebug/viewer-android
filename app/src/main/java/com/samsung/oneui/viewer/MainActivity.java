@@ -306,6 +306,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
             Ui.screenW = Math.max(1, r - l);
             Ui.screenH = Math.max(1, b - t);
             fitHeader();
+            applyAllPageInsets();
         });
 
         dock = new Dock(this, backdrop, new String[]{"홈", "보기", "목록", "설정"});
@@ -737,6 +738,12 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
         String meta = buildFileMetaSummary();
         dock.setFileState(hasOpenFile(), tab == 1, name, meta, Pages.iconForKind(currentKind), isModified, slots);
         refreshSubToolBar();
+        applyAllPageInsets();
+    }
+
+    void applyAllPageInsets() {
+        for (Page p : pages) if (p != null) p.applyInsets();
+        if (searchPage != null) searchPage.applyInsets();
     }
 
     private String buildFileMetaSummary() {

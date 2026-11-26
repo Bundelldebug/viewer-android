@@ -569,4 +569,52 @@ public class ViewerUiTest {
         assertNull(Shadows.shadowOf(a).getNextStartedService());
         c.pause().stop().destroy();
     }
+
+    @Test public void hwpxRichRendersImagesTablesAndFramesEndToEnd() throws Exception {
+        ActivityController<MainActivity> c = launch(412, 915);
+        MainActivity a = c.get();
+        // Build a synthetic .hwpx containing a real PNG in BinData, a shaded merged table, and a framed text box
+        File hwpx = new File(a.getCacheDir(), "rich_test.hwpx");
+        Bitmap bmp = Bitmap.createBitmap(160, 80, Bitmap.Config.ARGB_8888);
+        Canvas cv = new Canvas(bmp);
+        cv.drawColor(0xFF1E88E5);
+        Paint pt = new Paint(Paint.ANTI_ALIAS_FLAG);
+        pt.setColor(0xFFFFD54F);
+        cv.drawCircle(80, 40, 28, pt);
+        java.io.ByteArrayOutputStream pngBos = new java.io.ByteArrayOutputStream();
+        bmp.compress(Bitmap.CompressFormat.PNG, 100, pngBos);
+        bmp.recycle();
+
+        String hpf = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><opf:package xmlns:opf=\"http://www.idpf.org/2007/opf/\">"
+                + "<opf:manifest><opf:item id=\"image1\" href=\"../BinData/image1.png\" media-type=\"image/png\"/></opf:manifest></opf:package>";
+        String hdr = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><hh:head xmlns:hh=\"http://www.hancom.co.kr/hwpml/2011/head\" xmlns:hc=\"http://www.hancom.co.kr/hwpml/2011/core\">"
+                + "<hh:refList><hh:borderFills><hh:borderFill id=\"1\"><hh:leftBorder type=\"SOLID\" color=\"#334155\"/><hh:rightBorder type=\"SOLID\" color=\"#334155\"/>"
+                + "<hh:topBorder type=\"SOLID\" color=\"#334155\"/><hh:bottomBorder type=\"SOLID\" color=\"#334155\"/>"
+                + "<hc:fillBrush><hc:winBrush faceColor=\"#DBEAFE\"/></hc:fillBrush></hh:borderFill></hh:borderFills></hh:refList></hh:head>";
+        String sec = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><hs:sec xmlns:hs=\"http://www.hancom.co.kr/hwpml/2011/section\" xmlns:hp=\"http://www.hancom.co.kr/hwpml/2011/paragraph\" xmlns:hc=\"http://www.hancom.co.kr/hwpml/2011/core\">"
+                + "<hp:p><hp:run><hp:t>한글 리치 문서 제목</hp:t></hp:run></hp:p>"
+                + "<hp:p><hp:run><hp:pic><hp:curSz width=\"15000\" height=\"7500\"/><hc:img binaryItemIDRef=\"image1\"/></hp:pic></hp:run></hp:p>"
+                + "<hp:p><hp:run><hp:tbl><hp:sz width=\"40000\" height=\"6000\"/>"
+                + "<hp:tr><hp:tc borderFillIDRef=\"1\"><hp:cellSpan colSpan=\"2\" rowSpan=\"1\"/><hp:subList><hp:p><hp:run><hp:t>표 병합 헤더</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr>"
+                + "<hp:tr><hp:tc borderFillIDRef=\"1\"><hp:subList><hp:p><hp:run><hp:t>항목 A</hp:t></hp:run></hp:p></hp:subList></hp:tc>"
+                + "<hp:tc borderFillIDRef=\"1\"><hp:subList><hp:p><hp:run><hp:t>값 100%</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr>"
+                + "</hp:tbl></hp:run></hp:p>"
+                + "<hp:p><hp:run><hp:rect><hp:lineShape style=\"SOLID\" color=\"#0381FE\"/><hp:drawText><hp:subList><hp:p><hp:run><hp:t>글상자 템플릿 프레임</hp:t></hp:run></hp:p></hp:subList></hp:drawText></hp:rect></hp:run></hp:p>"
+                + "</hs:sec>";
+        try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(new FileOutputStream(hwpx))) {
+            zos.putNextEntry(new java.util.zip.ZipEntry("Contents/content.hpf")); zos.write(hpf.getBytes(java.nio.charset.StandardCharsets.UTF_8)); zos.closeEntry();
+            zos.putNextEntry(new java.util.zip.ZipEntry("Contents/header.xml")); zos.write(hdr.getBytes(java.nio.charset.StandardCharsets.UTF_8)); zos.closeEntry();
+            zos.putNextEntry(new java.util.zip.ZipEntry("Contents/section0.xml")); zos.write(sec.getBytes(java.nio.charset.StandardCharsets.UTF_8)); zos.closeEntry();
+            zos.putNextEntry(new java.util.zip.ZipEntry("BinData/image1.png")); zos.write(pngBos.toByteArray()); zos.closeEntry();
+        }
+        String html = HwpRich.renderHwpx(hwpx.getAbsolutePath(), null);
+        assertTrue("HWPX HTML includes base64 PNG image", html.contains("data:image/png;base64,"));
+        assertTrue("HWPX HTML includes merged table cell", html.contains("colspan=\"2\""));
+        assertTrue("HWPX HTML includes shaded fill color", html.contains("#DBEAFE"));
+        assertTrue("HWPX HTML includes template box frame", html.contains("class=\"hwp-box\""));
+        a.openFileAtPath(hwpx.getAbsolutePath());
+        layout(a, 412, 915);
+        screenshot(a, "hwpx-rich-rendered", 412, 915);
+        c.pause().stop().destroy();
+    }
 }

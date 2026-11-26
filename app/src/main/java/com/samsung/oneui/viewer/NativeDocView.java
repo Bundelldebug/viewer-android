@@ -72,6 +72,7 @@ public final class NativeDocView extends FrameLayout {
     private DocListener listener;
     private final ScrollView vScroll;
     private final LinearLayout rootContainer;
+    private android.webkit.WebView richWebView;
     private LinearLayout sheetTabsBar;
 
     private String currentPath = "";
@@ -108,6 +109,65 @@ public final class NativeDocView extends FrameLayout {
         rootContainer.setPadding(pad, pad, pad, dp(88));
         vScroll.addView(rootContainer, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         addView(vScroll, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private static boolean isRobolectric() {
+        return "robolectric".equalsIgnoreCase(android.os.Build.FINGERPRINT)
+                || "robolectric".equalsIgnoreCase(android.os.Build.MODEL);
+    }
+
+    private boolean shouldUseRichWebView() {
+        if (isEditing || isRobolectric()) return false;
+        String ext = Util.extOf(currentPath);
+        return ".hwp".equals(ext) || ".hwpx".equals(ext) || ".docx".equals(ext) || ".docm".equals(ext) || ".dotx".equals(ext);
+    }
+
+    private void renderInRichWebView() {
+        try {
+            if (richWebView == null) {
+                richWebView = new android.webkit.WebView(getContext());
+                android.webkit.WebSettings ws = richWebView.getSettings();
+                ws.setJavaScriptEnabled(false);
+                ws.setBuiltInZoomControls(true);
+                ws.setDisplayZoomControls(false);
+                ws.setUseWideViewPort(true);
+                ws.setLoadWithOverviewMode(true);
+                richWebView.setBackgroundColor(isDarkTheme ? 0xFF0E1117 : 0xFFF2F4F8);
+                addView(richWebView, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            }
+            richWebView.setVisibility(View.VISIBLE);
+            vScroll.setVisibility(View.GONE);
+            richWebView.setBackgroundColor(isDarkTheme ? 0xFF0E1117 : 0xFFF2F4F8);
+            int pct = Math.round(zoomScale * 100f);
+            String bg = isDarkTheme ? "#0E1117" : "#F2F4F8";
+            String paper = isDarkTheme ? "#1A1E27" : "#FFFFFF";
+            String fg = isDarkTheme ? "#F1F3F9" : "#15181E";
+            String bd = isDarkTheme ? "#333B4C" : "#B8C4D4";
+            String pageShadow = isDarkTheme ? "0 2px 14px rgba(0,0,0,.45)" : "0 2px 14px rgba(15,23,42,.08)";
+            String noteHtml = (docNote != null && !docNote.isEmpty())
+                    ? "<div class=\"note\">안내: " + Docs.esc(docNote) + "</div>" : "";
+            String fullHtml = "<!doctype html><html><head><meta charset=\"utf-8\">"
+                    + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=4,user-scalable=yes\">"
+                    + "<style>"
+                    + "*{box-sizing:border-box}"
+                    + "html,body{margin:0;padding:12px 10px 96px;background:" + bg + ";color:" + fg
+                    + ";font-family:sans-serif;font-size:" + pct + "%;line-height:1.6;-webkit-text-size-adjust:100%}"
+                    + ".paper{background:" + paper + ";border-radius:16px;padding:18px 16px;box-shadow:" + pageShadow
+                    + ";max-width:860px;margin:0 auto;overflow-x:auto}"
+                    + ".note{background:rgba(3,129,254,.12);color:#0381FE;border:1px solid rgba(3,129,254,.3);border-radius:10px;padding:8px 12px;font-size:12px;margin-bottom:12px}"
+                    + "p{margin:0 0 6px;word-break:break-word}p.empty{min-height:10px}"
+                    + "table.grid,table.hwp-tbl{width:100%;border-collapse:collapse;margin:10px 0;table-layout:auto}"
+                    + "table.grid td,table.grid th,table.hwp-tbl td,table.hwp-tbl th{border:1px solid " + bd + ";padding:6px 8px;vertical-align:middle;word-break:break-word}"
+                    + "img{max-width:100%;height:auto;display:block;margin:8px auto;border-radius:4px}"
+                    + ".hwp-box{border:1px solid " + bd + ";border-radius:8px;padding:10px 12px;margin:8px 0}"
+                    + ".hwp-hf{border-bottom:1px solid " + bd + ";padding:6px 10px;margin:4px 0;font-size:0.9em;opacity:.88}"
+                    + "hr.pb{border:none;border-top:2px dashed " + bd + ";margin:18px 0}"
+                    + "</style></head><body><div class=\"paper\">" + noteHtml + cachedRawHtml + "</div></body></html>";
+            richWebView.loadDataWithBaseURL("file:///", fullHtml, "text/html", "UTF-8", null);
+        } catch (Throwable t) {
+            if (richWebView != null) richWebView.setVisibility(View.GONE);
+            vScroll.setVisibility(View.VISIBLE);
+        }
     }
 
     private int dp(float v) {
@@ -439,6 +499,10 @@ public final class NativeDocView extends FrameLayout {
     }
 
     private void rebuildNativeViewsFromHtml(String html, boolean createUnits) {
+        if (richWebView != null) {
+            richWebView.setVisibility(View.GONE);
+        }
+        vScroll.setVisibility(View.VISIBLE);
         rootContainer.removeAllViews();
         sheetContainers.clear();
         sheetNames.clear();
@@ -505,6 +569,9 @@ public final class NativeDocView extends FrameLayout {
 
         // Case 4: Word / HWPX / HWP / ODT / RTF Document
         buildWordNativeViews(html, createUnits, unitCursor, cardBg, cardBorder, textPrimary, textSecondary);
+        if (shouldUseRichWebView()) {
+            renderInRichWebView();
+        }
     }
 
     private LinearLayout createCardContainer(int bgColor, int borderColor) {
@@ -1056,10 +1123,13 @@ public final class NativeDocView extends FrameLayout {
                 cellBox.addView(tv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             }
 
+            // Compute explicit pixel column width so GridLayout inside HorizontalScrollView NEVER collapses width=0 cells!
+            int screenAvail = Math.max(dp(280), getResources().getDisplayMetrics().widthPixels - dp(68));
+            int colW = Math.max(dp(64), screenAvail / Math.max(1, maxCols));
             GridLayout.LayoutParams glp = new GridLayout.LayoutParams(
                     GridLayout.spec(pc.row, pc.rowSpan, GridLayout.FILL),
-                    GridLayout.spec(pc.col, pc.colSpan, GridLayout.FILL, (float) pc.colSpan));
-            glp.width = 0;
+                    GridLayout.spec(pc.col, pc.colSpan, GridLayout.FILL));
+            glp.width = colW * pc.colSpan;
             glp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
             grid.addView(cellBox, glp);
         }

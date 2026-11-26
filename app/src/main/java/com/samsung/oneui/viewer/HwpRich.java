@@ -56,6 +56,8 @@ final class HwpRich {
     private static final class BorderFillStyle {
         String bgColor;
         String borderColor;
+        String bgImgRef; // HWPX imgBrush binaryItemIDRef
+        int bgBinId = -1; // HWP 5.0 image fill binItemId
         boolean hasBorder = true;
         boolean hasAnyBorder = true;
     }
@@ -66,6 +68,8 @@ final class HwpRich {
         final Map<String, BorderFillStyle> borders = new HashMap<>();
         final Map<String, String> manifest = new HashMap<>(); // id -> zip entry path
         final Map<String, String> binByStem = new HashMap<>(); // lowercase stem -> zip entry path
+        final Map<String, String> allBinEntries = new LinkedHashMap<>(); // canonical entry -> entry
+        final Set<String> usedEntries = new HashSet<>();
         long imgBudget = 40L * 1024 * 1024;
     }
 
@@ -91,6 +95,13 @@ final class HwpRich {
                     }
                 }
             }
+            // Fallback: append any embedded BinData images not directly referenced via <hp:pic> (e.g., OLE/chart/shape fills)
+            for (String binEntry : st.allBinEntries.values()) {
+                if (!st.usedEntries.contains(binEntry.toLowerCase(Locale.ROOT))) {
+                    String tag = zipImageTag(z, binEntry, "max-width:100%;height:auto;display:block;margin:8px auto;", st);
+                    if (!tag.isEmpty()) sb.append(tag);
+                }
+            }
             return sb.append("</div>").toString();
         }
     }
@@ -108,6 +119,7 @@ final class HwpRich {
                 String stem = (dot > 0 ? base.substring(0, dot) : base).toLowerCase(Locale.ROOT);
                 st.binByStem.put(stem, n);
                 st.binByStem.put(base.toLowerCase(Locale.ROOT), n);
+                st.allBinEntries.put(nl, n);
             }
         }
     }
@@ -211,6 +223,11 @@ final class HwpRich {
                         if (col != null) bs.bgColor = normHexColor(Docs.attr(col, "value"), true);
                     }
                 }
+                Element imgBrush = Docs.find(fill, "imgBrush");
+                if (imgBrush != null) {
+                    Element im = Docs.find(imgBrush, "img");
+                    if (im != null) bs.bgImgRef = Docs.attr(im, "binaryItemIDRef");
+                }
             }
             int visibleSides = 0;
             String foundColor = null;
@@ -307,8 +324,16 @@ final class HwpRich {
                     // and WebView displays them cleanly at their proper size!
                     blocks.append(imgHtml);
                 }
-            } else if ("rect".equals(nm) || "ellipse".equals(nm) || "polygon".equals(nm) || "container".equals(nm)) {
+            } else if ("switch".equals(nm)) {
+                // HWPX <hp:switch> wraps modern/fallback representations: prefer first <case>, else <default>
+                Element chosen = Docs.kid(x, "case");
+                if (chosen == null) chosen = Docs.kid(x, "default");
+                if (chosen != null) hwpxWalk(chosen, z, st, reg, curChar, line, blocks);
+            } else if ("rect".equals(nm) || "ellipse".equals(nm) || "polygon".equals(nm) || "container".equals(nm)
+                    || "curve".equals(nm) || "arc".equals(nm) || "textart".equals(nm)) {
                 renderHwpxShapeBox(x, z, st, reg, blocks);
+            } else if ("line".equals(nm) || "connectLine".equals(nm)) {
+                blocks.append("<hr style=\"border:none;border-top:1px solid #94a3b8;margin:6px 0;\">");
             } else if ("header".equals(nm) || "footer".equals(nm)) {
                 StringBuilder hf = new StringBuilder();
                 for (Element p : directSubListParagraphs(x)) hwpxBlock(p, z, st, reg, hf);
@@ -348,6 +373,14 @@ final class HwpRich {
                     if (cbf.bgColor != null) cStyle.append("background-color:").append(cbf.bgColor).append(";");
                     if (!cbf.hasAnyBorder) cStyle.append("border:none;");
                     else if (cbf.borderColor != null) cStyle.append("border:1px solid ").append(cbf.borderColor).append(";");
+                } else {
+                    cStyle.append("border:1px solid #9AA5B4;");
+                }
+                Element sl = Docs.kid(tc, "subList");
+                if (sl != null) {
+                    String va = Docs.attr(sl, "vertAlign");
+                    if ("CENTER".equalsIgnoreCase(va)) cStyle.append("vertical-align:middle;");
+                    else if ("BOTTOM".equalsIgnoreCase(va)) cStyle.append("vertical-align:bottom;");
                 }
                 Element csz = Docs.kid(tc, "cellSz");
                 if (csz != null && tblWidth > 0) {
@@ -362,7 +395,10 @@ final class HwpRich {
                 if (rowSpan > 1) out.append(" rowspan=\"").append(rowSpan).append("\"");
                 if (cStyle.length() > 0) out.append(" style=\"").append(cStyle).append("\"");
                 out.append(">");
-
+                if (cbf != null && cbf.bgImgRef != null && !cbf.bgImgRef.isEmpty()) {
+                    String bgTag = renderHwpxBinId(cbf.bgImgRef, z, st, "max-width:100%;height:auto;display:block;margin:4px auto;");
+                    if (!bgTag.isEmpty()) out.append(bgTag);
+                }
                 for (Element p : directSubListParagraphs(tc)) {
                     hwpxBlock(p, z, st, reg, out);
                 }
@@ -389,14 +425,19 @@ final class HwpRich {
         Element drawText = Docs.kid(box, "drawText");
         List<Element> ps = drawText != null ? directSubListParagraphs(drawText) : Collections.<Element>emptyList();
         Element pic = Docs.find(box, "pic");
-        if (ps.isEmpty() && pic == null) return;
-
+        String fillImgRef = null;
         String bg = null, bd = null;
         Element fill = Docs.kid(box, "fillBrush");
         if (fill != null) {
             Element wb = Docs.find(fill, "winBrush");
             if (wb != null) bg = normHexColor(Docs.attr(wb, "faceColor"), true);
+            Element ib = Docs.find(fill, "imgBrush");
+            if (ib != null) {
+                Element im = Docs.find(ib, "img");
+                if (im != null) fillImgRef = Docs.attr(im, "binaryItemIDRef");
+            }
         }
+        if (ps.isEmpty() && pic == null && fillImgRef == null) return;
         Element ls = Docs.kid(box, "lineShape");
         if (ls != null) {
             String ty = Docs.attr(ls, "style");
@@ -410,9 +451,27 @@ final class HwpRich {
         else if (bg == null) style.append("border:1px solid #cbd5e1;");
 
         out.append("<div class=\"hwp-box\" style=\"").append(style).append("\">");
+        if (fillImgRef != null) out.append(renderHwpxBinId(fillImgRef, z, st, "max-width:100%;height:auto;display:block;margin:6px auto;"));
         if (pic != null) out.append(renderHwpxPic(pic, z, st));
         for (Element p : ps) hwpxBlock(p, z, st, reg, out);
         out.append("</div>");
+    }
+
+    private static String renderHwpxBinId(String id, ZipFile z, HwpxStyles st, String style) {
+        if (z == null || id == null || id.isEmpty()) return "";
+        String entry = st.manifest.get(id);
+        if (entry == null) entry = st.manifest.get(id.toLowerCase(Locale.ROOT));
+        if (entry == null) entry = st.binByStem.get(id.toLowerCase(Locale.ROOT));
+        if (entry == null) {
+            String idl = id.toLowerCase(Locale.ROOT);
+            for (Map.Entry<String, String> e : st.binByStem.entrySet()) {
+                if (e.getKey().equals(idl) || e.getKey().endsWith("/" + idl) || e.getKey().startsWith(idl + ".")) {
+                    entry = e.getValue();
+                    break;
+                }
+            }
+        }
+        return entry == null ? "" : zipImageTag(z, entry, style, st);
     }
 
     private static String renderHwpxPic(Element node, ZipFile z, HwpxStyles st) {
@@ -422,31 +481,16 @@ final class HwpRich {
         String id = Docs.attr(im, "binaryItemIDRef");
         if (id == null || id.isEmpty()) return "";
 
-        String entry = st.manifest.get(id);
-        if (entry == null) entry = st.manifest.get(id.toLowerCase(Locale.ROOT));
-        if (entry == null) entry = st.binByStem.get(id.toLowerCase(Locale.ROOT));
-        if (entry == null) {
-            // Try partial match in BinData
-            String idl = id.toLowerCase(Locale.ROOT);
-            for (Map.Entry<String, String> e : st.binByStem.entrySet()) {
-                if (e.getKey().equals(idl) || e.getKey().endsWith("/" + idl)) {
-                    entry = e.getValue();
-                    break;
-                }
-            }
-        }
-        if (entry == null) return "";
-
         String style = "max-width:100%;height:auto;display:block;margin:6px auto;";
         Element curSz = Docs.find(node, "curSz");
         if (curSz != null) {
             long wHwp = parseLong(Docs.attr(curSz, "width"), 0);
             if (wHwp > 0) {
-                int wPx = (int) Math.round(wHwp / 75.0); // 7200 hwpunit/inch ≈ 96px/inch -> 75 hwpunit/px
+                int wPx = (int) Math.round(wHwp / 75.0);
                 if (wPx >= 24 && wPx <= 1200) style = "width:" + wPx + "px;max-width:100%;height:auto;display:block;margin:6px auto;";
             }
         }
-        return zipImageTag(z, entry, style, st);
+        return renderHwpxBinId(id, z, st, style);
     }
 
     private static List<Element> directSubListParagraphs(Element container) {
@@ -467,6 +511,7 @@ final class HwpRich {
                 if (found != null) ze = z.getEntry(found);
             }
             if (ze == null) return "";
+            st.usedEntries.add(ze.getName().toLowerCase(Locale.ROOT));
             byte[] b = readStream(z.getInputStream(ze), 12 * 1024 * 1024);
             if (b.length == 0 || b.length > st.imgBudget) return "";
             st.imgBudget -= b.length;
@@ -510,7 +555,7 @@ final class HwpRich {
         int flags = le32(fh, 36);
         boolean compressed = (flags & 1) != 0;
         if ((flags & 2) != 0) throw new Exception("암호가 설정된 HWP 문서는 열 수 없습니다.");
-        if ((flags & 4) != 0) throw new Exception("배포용(보기 전용) HWP 문서는 열 수 없습니다.");
+        boolean distribution = (flags & 4) != 0;
 
         HwpDocInfo info = new HwpDocInfo();
         byte[] docInfoRaw = cf.read("DocInfo");
@@ -523,18 +568,48 @@ final class HwpRich {
         StringBuilder sb = new StringBuilder("<div class=\"docx hwp\">");
         int sec = 0;
         boolean hasContent = false;
+        String sectionPrefix = distribution ? "ViewText/Section" : "BodyText/Section";
         while (true) {
-            byte[] raw = cf.read("BodyText/Section" + sec);
+            byte[] raw = cf.read(sectionPrefix + sec);
             if (raw == null) break;
             if (sec > 0) sb.append("<hr class=\"pb\">");
             sec++;
-            byte[] secBytes = compressed ? inflateSafe(raw) : raw;
-            List<HwpRec> recs = parseHwpRecords(secBytes);
-            int before = sb.length();
-            renderHwpRange(recs, 0, recs.size(), 0, info, sb);
-            if (sb.length() > before) hasContent = true;
+            byte[] secBytes;
+            if (distribution) {
+                secBytes = decryptHwpViewText(raw, compressed);
+            } else {
+                secBytes = compressed ? inflateSafe(raw) : raw;
+            }
+            if (secBytes != null && secBytes.length > 0) {
+                List<HwpRec> recs = parseHwpRecords(secBytes);
+                int before = sb.length();
+                renderHwpRange(recs, 0, recs.size(), 0, info, sb);
+                if (sb.length() > before) hasContent = true;
+            }
         }
-        if (sec == 0) throw new Exception("본문을 찾을 수 없습니다.");
+        // Fallback: if ViewText/BodyText failed to yield content, try PrvImage + PrvText embedded in HWP!
+        if (!hasContent) {
+            byte[] prvImg = cf.read("PrvImage");
+            if (prvImg != null && prvImg.length > 16) {
+                String mime = detectImageMime(prvImg, "prv.png");
+                if (mime != null) {
+                    sb.append("<img src=\"data:").append(mime).append(";base64,").append(Util.b64Encode(prvImg))
+                            .append("\" style=\"max-width:100%;height:auto;display:block;margin:8px auto;\">");
+                    hasContent = true;
+                }
+            }
+            byte[] prvTxt = cf.read("PrvText");
+            if (prvTxt != null && prvTxt.length >= 2) {
+                String txt = new String(prvTxt, java.nio.charset.StandardCharsets.UTF_16LE).trim();
+                if (!txt.isEmpty()) {
+                    for (String line : txt.split("\\r?\\n")) {
+                        sb.append("<p>").append(Docs.esc(line)).append("</p>");
+                    }
+                    hasContent = true;
+                }
+            }
+        }
+        if (sec == 0 && !hasContent) throw new Exception("본문을 찾을 수 없습니다.");
 
         // Fallback: append any remaining embedded bitmap images not explicitly placed by picture records
         for (Map.Entry<Integer, byte[]> e : info.binBytes.entrySet()) {
@@ -853,11 +928,9 @@ final class HwpRich {
                 i++;
             } else if (r.tag == 0x48 && r.level == cellLevel) { // HWPTAG_LIST_HEADER for a cell
                 HwpCell cell = new HwpCell();
-                // List header: paraCount(2/4) + attr(4) = 6 or 8 bytes; cell props follow:
-                // col(2), row(2), colSpan(2), rowSpan(2), width(4), height(4), margins(8), borderFillId(2)
-                int off = -1;
-                if (r.data.length >= 34) off = 8;
-                else if (r.data.length >= 32) off = 6;
+                // HWP 5.0 Cell LIST_HEADER: paraCount(2) + attr(4) = 6 bytes, OR paraCount(2) + pad(2) + attr(4) = 8 bytes!
+                // Validate candidate offsets (6 vs 8) against table rowCount/colCount so cells NEVER misalign on >=34-byte headers!
+                int off = detectCellPropsOffset(r.data, rowCount, colCount);
                 if (off > 0) {
                     cell.col = le16(r.data, off);
                     cell.row = le16(r.data, off + 2);
@@ -922,6 +995,66 @@ final class HwpRich {
             out.append("</tr>");
         }
         out.append("</table>");
+    }
+
+    private static int detectCellPropsOffset(byte[] d, int rowCount, int colCount) {
+        if (d == null || d.length < 32) return -1;
+        int maxR = rowCount > 0 ? rowCount : 500;
+        int maxC = colCount > 0 ? colCount : 200;
+        int[] candidates = (d.length >= 34) ? new int[]{6, 8} : new int[]{6};
+        for (int off : candidates) {
+            if (off + 26 > d.length) continue;
+            int col = le16(d, off);
+            int row = le16(d, off + 2);
+            int cs = le16(d, off + 4);
+            int rs = le16(d, off + 6);
+            long w = le32(d, off + 8) & 0xFFFFFFFFL;
+            if (col < maxC && row < maxR && cs >= 1 && cs <= maxC && rs >= 1 && rs <= maxR && w > 0 && w < 200_000_000L) {
+                return off;
+            }
+        }
+        return d.length >= 34 ? 8 : 6;
+    }
+
+    /** Decrypts HWP 5.0 ViewText/Section* distribution stream (standard HWPTAG_DISTRIBUTE_DOC_DATA + AES-128-ECB). */
+    private static byte[] decryptHwpViewText(byte[] raw, boolean compressed) {
+        try {
+            if (raw == null || raw.length <= 260) return null;
+            int tag = le32(raw, 0) & 0x3FF;
+            int sz = (le32(raw, 0) >>> 20) & 0xFFF;
+            if (tag != 0x1C || sz != 256 || raw.length < 260) {
+                return compressed ? inflateSafe(raw) : raw;
+            }
+            byte[] dist = Arrays.copyOfRange(raw, 4, 260);
+            int seed = le32(dist, 0);
+            int[] state = {seed};
+            byte[] decrypted = new byte[256];
+            System.arraycopy(dist, 0, decrypted, 0, 4);
+            int i = 4;
+            while (i < 256) {
+                int val = hwpRand(state) & 0xFF;
+                int cnt = (hwpRand(state) & 0x0F) + 1;
+                for (int k = 0; k < cnt && i < 256; k++, i++) {
+                    decrypted[i] = (byte) ((dist[i] & 0xFF) ^ val);
+                }
+            }
+            int keyOff = 4 + (seed & 0x0F);
+            byte[] key = Arrays.copyOfRange(decrypted, keyOff, keyOff + 16);
+            byte[] body = Arrays.copyOfRange(raw, 260, raw.length);
+            int paddedLen = (body.length / 16) * 16;
+            if (paddedLen <= 0) return null;
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/ECB/NoPadding");
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, new javax.crypto.spec.SecretKeySpec(key, "AES"));
+            byte[] plain = cipher.doFinal(body, 0, paddedLen);
+            return compressed ? inflateSafe(plain) : plain;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static int hwpRand(int[] seed) {
+        seed[0] = (seed[0] * 214013 + 2531011);
+        return (seed[0] >>> 16) & 0x7FFF;
     }
 
     private static void renderHwpGso(List<HwpRec> recs, int start, int end, int ctrlLevel, HwpDocInfo info, StringBuilder out) {
@@ -1064,9 +1197,24 @@ final class HwpRich {
     private static String resolveEntry(ZipFile z, String href) {
         String clean = href.replace('\\', '/');
         while (clean.startsWith("/")) clean = clean.substring(1);
-        String f = findEntryIgnoreCase(z, clean);
+        // Normalize ../ segments (e.g. "../BinData/image1.png" relative to Contents/content.hpf)
+        List<String> parts = new ArrayList<>();
+        for (String seg : clean.split("/")) {
+            if ("..".equals(seg)) {
+                if (!parts.isEmpty()) parts.remove(parts.size() - 1);
+            } else if (!".".equals(seg) && !seg.isEmpty()) {
+                parts.add(seg);
+            }
+        }
+        StringBuilder norm = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) norm.append('/');
+            norm.append(parts.get(i));
+        }
+        String normStr = norm.toString();
+        String f = findEntryIgnoreCase(z, normStr);
         if (f != null) return f;
-        return findEntryIgnoreCase(z, "Contents/" + clean);
+        return findEntryIgnoreCase(z, "Contents/" + normStr);
     }
 
     private static String baseName(String p) {

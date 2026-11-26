@@ -620,6 +620,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
     @Override public void onBackPressed() {
         if (GlassMenu.dismissAny(root)) return;
         if (slideshowRunning) { stopSlideshow(); return; }
+        if (sideP > 0.1f) { closeSidebar(); return; }
         if (searching) { onExitSearch(); return; }
         if (tab == 1 && hasOpenFile()) {
             if (!"hand".equals(stageCanvasView.getActiveTool())) {

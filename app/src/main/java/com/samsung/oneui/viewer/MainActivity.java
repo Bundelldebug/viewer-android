@@ -341,8 +341,9 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
-                int st = insets.getInsets(WindowInsets.Type.statusBars()).top;
-                int nav = insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
+                android.graphics.Insets sys = insets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                int st = sys.top;
+                int nav = sys.bottom;
                 int ime = insets.getInsets(WindowInsets.Type.ime()).bottom;
                 boolean changed = st != Ui.statusInset || nav != Ui.navInset;
                 Ui.statusInset = st;
@@ -379,7 +380,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
             }
         });
 
-        int initialTab = hasOpenFile() ? 1 : Math.min(3, Math.max(0, tab));
+        int initialTab = Math.min(3, Math.max(0, tab));
         if (!hasOpenFile() && initialTab == 1) initialTab = 0;
         tab = initialTab;
         pages[tab].setVisibility(View.VISIBLE);
@@ -601,6 +602,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
         bgPool.shutdownNow();
         mainHandler.removeCallbacksAndMessages(null);
         if (nativeMediaView != null) nativeMediaView.stopMedia();
+        if (nativeDocView != null) nativeDocView.destroy();
         PdfHost.closeAll();
         super.onDestroy();
     }
@@ -1071,7 +1073,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
     // ---- Header.Listener ----
     @Override public void onBack() {
-        if (tab == 1) switchTab(0);
+        onBackPressed();
     }
 
     @Override public void onHeaderButton(int icon, RectF anchor) {
@@ -1382,11 +1384,13 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
             stageHostFrame.addView(stageCanvasView, match());
         } else if ("doc".equals(currentKind)) {
             detachFromParent(nativeDocView);
-            nativeDocView.setPadding(0, Ui.statusInset + Ui.dp(62), sideInset(), bottomPadding());
+            nativeDocView.setPadding(0, 0, 0, 0);
             stageHostFrame.addView(nativeDocView, match());
+            if (stagePage != null) stagePage.applyInsets();
         } else if ("media".equals(currentKind)) {
             detachFromParent(nativeMediaView);
             stageHostFrame.addView(nativeMediaView, match());
+            if (stagePage != null) stagePage.applyInsets();
         }
     }
 
@@ -2588,9 +2592,15 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
     private void copyCurrentImage() {
         try {
-            Bitmap bitmap = "image".equals(currentKind)
-                    ? MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations())
-                    : ("pdf".equals(currentKind) ? stageCanvasView.getPdfPages().get(stageCanvasView.getCurrentPdfPage()).renderFlattened(1800) : null);
+            Bitmap bitmap = null;
+            if ("image".equals(currentKind)) {
+                bitmap = MarkupModel.flattenOntoBitmap(stageCanvasView.getImageBitmap(), stageCanvasView.getImageAnnotations());
+            } else if ("pdf".equals(currentKind)) {
+                int pi = stageCanvasView.getCurrentPdfPage();
+                if (stageCanvasView.getPdfPages() != null && pi >= 0 && pi < stageCanvasView.getPdfPages().size()) {
+                    bitmap = stageCanvasView.getPdfPages().get(pi).renderFlattened(1800);
+                }
+            }
             if (bitmap == null) { toast("복사할 이미지가 없어요."); return; }
             RectF sel = stageCanvasView.getSelectionRect();
             if ("image".equals(currentKind) && sel != null && sel.width() > 0 && sel.height() > 0) {

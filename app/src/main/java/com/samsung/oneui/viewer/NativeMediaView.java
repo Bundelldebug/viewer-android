@@ -41,10 +41,23 @@ public final class NativeMediaView extends FrameLayout {
     private final ImageView playBtnIcon;
     private final SeekBar seekBar;
     private final TextView timeText;
+    private final LinearLayout controlBar;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private MediaPlayer activePlayer;
     private boolean isPlaying = false;
     private boolean isDraggingSeek = false;
+
+    public void setSafeInsets(int bottomPx, int rightPx) {
+        if (controlBar == null) return;
+        LayoutParams lp = (LayoutParams) controlBar.getLayoutParams();
+        int wantB = Math.max(dp(84), bottomPx + dp(10));
+        int wantR = dp(24) + Math.max(0, rightPx);
+        if (lp != null && (lp.bottomMargin != wantB || lp.rightMargin != wantR)) {
+            lp.bottomMargin = wantB;
+            lp.rightMargin = wantR;
+            controlBar.setLayoutParams(lp);
+        }
+    }
 
     private final Runnable progressTicker = new Runnable() {
         @Override
@@ -133,6 +146,7 @@ public final class NativeMediaView extends FrameLayout {
         blp.leftMargin = dp(24);
         blp.rightMargin = dp(24);
         blp.bottomMargin = dp(84);
+        controlBar = bar;
         addView(bar, blp);
 
         seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {

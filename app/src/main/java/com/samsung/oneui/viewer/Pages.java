@@ -311,6 +311,9 @@ final class Pages {
                 int extraSub = (subToolHost != null && subToolHost.getVisibility() == VISIBLE) ? Ui.dp(50) : 0;
                 main.nativeDocView.setSafeInsets(topSafe + extraSub, botSafe, rightSafe);
             }
+            if (main.nativeMediaView != null) {
+                main.nativeMediaView.setSafeInsets(botSafe, rightSafe);
+            }
         }
 
         @Override void build() {}

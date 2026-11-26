@@ -124,8 +124,24 @@ public final class NativeDocView extends FrameLayout {
         safeRightPx = rightPx;
         int pad = dp(14);
         rootContainer.setPadding(pad, topPx + dp(10), pad + rightPx, Math.max(dp(100), bottomPx + dp(14)));
-        if (richWebView != null && richWebView.getVisibility() == View.VISIBLE && !cachedRawHtml.isEmpty()) {
-            renderInRichWebView();
+        if (richWebView != null && richWebView.getVisibility() == View.VISIBLE) {
+            richWebView.setPadding(0, 0, 0, 0);
+            float d = Math.max(1f, getResources().getDisplayMetrics().density);
+            int tDp = Math.round(safeTopPx / d) + 12;
+            int bDp = Math.round(safeBottomPx / d) + 24;
+            int rDp = Math.round(safeRightPx / d) + 12;
+            try {
+                richWebView.evaluateJavascript(
+                        "document.documentElement.style.padding='" + tDp + "px " + rDp + "px " + bDp + "px 12px';",
+                        null);
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    public void destroy() {
+        if (richWebView != null) {
+            try { richWebView.destroy(); } catch (Throwable ignored) {}
+            richWebView = null;
         }
     }
 
@@ -274,6 +290,8 @@ public final class NativeDocView extends FrameLayout {
 
         Map<String, Object> res = Docs.render(path);
         if (!Boolean.TRUE.equals(res.get("ok"))) {
+            if (richWebView != null) richWebView.setVisibility(View.GONE);
+            vScroll.setVisibility(View.VISIBLE);
             rootContainer.removeAllViews();
             TextView err = new TextView(getContext());
             err.setText(String.valueOf(res.get("error") != null ? res.get("error") : "문서를 열 수 없습니다."));
@@ -418,6 +436,18 @@ public final class NativeDocView extends FrameLayout {
     // ---------- Find & Replace ----------
     public int performSearch(String query) {
         this.searchQuery = query != null ? query.trim() : "";
+        if (richWebView != null && richWebView.getVisibility() == View.VISIBLE) {
+            if (this.searchQuery.isEmpty()) {
+                richWebView.clearMatches();
+                if (listener != null) listener.onSearchHitsChanged(-1, 0);
+            } else {
+                richWebView.setFindListener((active, count, done) -> {
+                    if (done && listener != null) listener.onSearchHitsChanged(count > 0 ? active : -1, count);
+                });
+                richWebView.findAllAsync(this.searchQuery);
+            }
+            return 0;
+        }
         this.searchMatches.clear();
         this.activeSearchMatch = -1;
         if (!this.searchQuery.isEmpty()) {
@@ -438,6 +468,10 @@ public final class NativeDocView extends FrameLayout {
     }
 
     public void stepSearch(int delta) {
+        if (richWebView != null && richWebView.getVisibility() == View.VISIBLE) {
+            if (!this.searchQuery.isEmpty()) richWebView.findNext(delta >= 0);
+            return;
+        }
         if (searchMatches.isEmpty()) return;
         activeSearchMatch = (activeSearchMatch + delta + searchMatches.size()) % searchMatches.size();
         applySearchHighlights();

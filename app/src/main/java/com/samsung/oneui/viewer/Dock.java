@@ -338,6 +338,7 @@ final class Dock extends FrameLayout {
     }
 
     int chromeHeight() {
+        if (tablet || rail) return Ui.navInset + Ui.dp(miniVisible ? 76 : 20);
         return Ui.navInset + (int) raise() + Ui.dp(miniVisible ? (64 + 8 + 56 + 16) : (64 + 16));
     }
 
@@ -547,10 +548,11 @@ final class Dock extends FrameLayout {
 
         float k = rail ? 0f : Math.max(pillK(), search);
         float l = lift.value;
-        float barA = 1f - k;
+        float barA = (1f - k) * (tablet ? (1f - sideP) : 1f);
 
-        if (miniShow > 0.01f && !mini.isEmpty()) drawMini(canvas);
+        if (miniShow > 0.01f && !mini.isEmpty() && search < 0.15f) drawMini(canvas);
 
+        if (tablet && sideP > 0.98f) return;
         boolean lensVisible = (l > 0.02f || (touch == T_TAB && lift.target > 0f)) && barA > 0.25f && !Ui.gStyle;
         if (lensVisible && Build.VERSION.SDK_INT >= 33 && canvas.isHardwareAccelerated() && Glass.shadersOk && Ui.glass && contentNodeObj != null) {
             drawBarAndLens(canvas, k, l, barA);
@@ -905,7 +907,7 @@ final class Dock extends FrameLayout {
                 }
 
                 // Floating tab pill
-                if (pill.contains(x, y)) {
+                if (!(tablet && sideP > 0.5f) && pill.contains(x, y)) {
                     if (tablet && x < pill.left + lead()) {
                         touch = T_SIDE;
                         barPress.to(1f);

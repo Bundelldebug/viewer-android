@@ -1792,6 +1792,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
     void launchCameraCapture() {
         try {
             pendingCameraFile = new File(sampleDir, "Camera_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".jpg");
+            ViewerFileProvider.allowWriteTarget(pendingCameraFile);
             Uri uri = ViewerFileProvider.getUriForFile(this, pendingCameraFile);
             Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
             intent.putExtra(MediaStore.EXTRA_OUTPUT, uri);

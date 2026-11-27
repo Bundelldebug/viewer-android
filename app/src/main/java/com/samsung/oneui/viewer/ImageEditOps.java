@@ -432,8 +432,7 @@ public final class ImageEditOps {
     // Pure Java SVG renderer (supports viewBox, width/height, path, rect, circle, ellipse, line, polygon, polyline, text, g)
     public static Bitmap renderSvgToBitmap(File svgFile, int targetMaxSide) {
         try (FileInputStream fis = new FileInputStream(svgFile)) {
-            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-            dbf.setNamespaceAware(true);
+            DocumentBuilderFactory dbf = Docs.newSecureDocumentBuilderFactory();
             Document doc = dbf.newDocumentBuilder().parse(fis);
             Element root = doc.getDocumentElement();
 

@@ -165,6 +165,12 @@ public final class NativeDocView extends FrameLayout {
                 richWebView = new android.webkit.WebView(getContext());
                 android.webkit.WebSettings ws = richWebView.getSettings();
                 ws.setJavaScriptEnabled(false);
+                ws.setAllowFileAccess(false);
+                ws.setAllowContentAccess(false);
+                ws.setAllowFileAccessFromFileURLs(false);
+                ws.setAllowUniversalAccessFromFileURLs(false);
+                ws.setSaveFormData(false);
+                ws.setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW);
                 ws.setBuiltInZoomControls(true);
                 ws.setDisplayZoomControls(false);
                 ws.setUseWideViewPort(true);
@@ -172,6 +178,16 @@ public final class NativeDocView extends FrameLayout {
                 if (android.os.Build.VERSION.SDK_INT >= 33) {
                     ws.setAlgorithmicDarkeningAllowed(false);
                 }
+                richWebView.setWebViewClient(new android.webkit.WebViewClient() {
+                    @Override public boolean shouldOverrideUrlLoading(android.webkit.WebView view, android.webkit.WebResourceRequest req) {
+                        return true; // Never navigate away from offline rendered document
+                    }
+                    @Override public android.webkit.WebResourceResponse shouldInterceptRequest(android.webkit.WebView view, android.webkit.WebResourceRequest req) {
+                        // Block all external network/file subresource loads from untrusted documents
+                        return new android.webkit.WebResourceResponse("text/plain", "utf-8", 403, "Forbidden",
+                                java.util.Collections.emptyMap(), new java.io.ByteArrayInputStream(new byte[0]));
+                    }
+                });
                 richWebView.setBackgroundColor(isDarkTheme ? 0xFF0E1117 : 0xFFF2F4F8);
                 addView(richWebView, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             }
@@ -192,6 +208,7 @@ public final class NativeDocView extends FrameLayout {
             String noteHtml = (docNote != null && !docNote.isEmpty())
                     ? "<div class=\"note\">안내: " + Docs.esc(docNote) + "</div>" : "";
             String fullHtml = "<!doctype html><html><head><meta charset=\"utf-8\">"
+                    + "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline';\">"
                     + "<meta name=\"color-scheme\" content=\"light only\">"
                     + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=4,user-scalable=yes\">"
                     + "<style>"
@@ -210,7 +227,7 @@ public final class NativeDocView extends FrameLayout {
                     + ".hwp-hf{border-bottom:1px solid " + bd + ";padding:6px 10px;margin:4px 0;font-size:0.9em;color:#475569;background:#F8FAFC}"
                     + "hr.pb{border:none;border-top:2px dashed " + bd + ";margin:18px 0}"
                     + "</style></head><body><div class=\"paper\">" + noteHtml + cachedRawHtml + "</div></body></html>";
-            richWebView.loadDataWithBaseURL("file:///", fullHtml, "text/html", "UTF-8", null);
+            richWebView.loadDataWithBaseURL("about:blank", fullHtml, "text/html", "UTF-8", null);
         } catch (Throwable t) {
             if (richWebView != null) richWebView.setVisibility(View.GONE);
             vScroll.setVisibility(View.VISIBLE);

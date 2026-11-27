@@ -634,4 +634,40 @@ public class ViewerUiTest {
         screenshot(a, "hwpx-rich-rendered", 412, 915);
         c.pause().stop().destroy();
     }
+
+    @Test public void securityHardeningChecks() throws Exception {
+        Context ctx = RuntimeEnvironment.getApplication();
+
+        // 1. ViewerFileProvider blocks private app data (shared_prefs/databases/files) and path traversal
+        File cacheOk = new File(ctx.getCacheDir(), "shared_ok.pdf");
+        assertTrue(ViewerFileProvider.isAllowedFile(ctx, cacheOk));
+        File dataDir = new File(ctx.getApplicationInfo().dataDir);
+        File secretPrefs = new File(new File(dataDir, "shared_prefs"), "samsung_viewer_native_prefs.xml");
+        assertFalse(ViewerFileProvider.isAllowedFile(ctx, secretPrefs));
+        File traversal = new File(ctx.getCacheDir(), "../shared_prefs/samsung_viewer_native_prefs.xml");
+        assertFalse(ViewerFileProvider.isAllowedFile(ctx, traversal));
+        assertFalse(ViewerFileProvider.isWriteAllowed(cacheOk));
+        ViewerFileProvider.allowWriteTarget(cacheOk);
+        assertTrue(ViewerFileProvider.isWriteAllowed(cacheOk));
+
+        // 2. XXE payload inside ZIP XML is rejected by Docs.loadXml
+        File xxeZip = new File(ctx.getCacheDir(), "xxe_test.docx");
+        String xxeXml = "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><doc>&xxe;</doc>";
+        try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(new FileOutputStream(xxeZip))) {
+            zos.putNextEntry(new java.util.zip.ZipEntry("word/document.xml"));
+            zos.write(xxeXml.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(xxeZip)) {
+            assertNull("XXE DOCTYPE must be rejected", Docs.loadXml(zf, "word/document.xml"));
+        }
+        xxeZip.delete();
+
+        // 3. Updater URL allowlist
+        assertEquals("9.5.11", Updater.VERSION);
+        assertTrue(Updater.isTrustedReleaseUrl("https://github.com/Bundelldebug/viewer-android/releases/download/v9.5.11/SamsungViewer_Android.apk"));
+        assertTrue(Updater.isTrustedReleaseUrl("https://objects.githubusercontent.com/release/SamsungViewer_Android.apk"));
+        assertFalse(Updater.isTrustedReleaseUrl("http://github.com/Bundelldebug/viewer-android/releases/download/v9.5.11/SamsungViewer_Android.apk"));
+        assertFalse(Updater.isTrustedReleaseUrl("https://evil.example.com/SamsungViewer_Android.apk"));
+    }
 }

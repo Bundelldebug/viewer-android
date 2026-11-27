@@ -15,6 +15,56 @@ import java.util.Locale;
 
 public class ViewerFileProvider extends ContentProvider {
     public static final String AUTHORITY = "com.samsung.oneui.viewer.fileprovider";
+    private static final java.util.Set<String> WRITE_TARGETS = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    public static void allowWriteTarget(File file) {
+        if (file == null) return;
+        try { WRITE_TARGETS.add(file.getCanonicalPath()); } catch (Exception ignored) {}
+    }
+
+    public static boolean isWriteAllowed(File file) {
+        if (file == null) return false;
+        try { return WRITE_TARGETS.contains(file.getCanonicalPath()); } catch (Exception ignored) { return false; }
+    }
+
+    public static boolean isAllowedFile(android.content.Context ctx, File file) {
+        if (ctx == null || file == null) return false;
+        try {
+            String canon = file.getCanonicalPath();
+            String sep = File.separator;
+            // Explicitly block app private metadata directories
+            File dataDir = ctx.getApplicationInfo() != null && ctx.getApplicationInfo().dataDir != null
+                    ? new File(ctx.getApplicationInfo().dataDir) : null;
+            if (dataDir != null) {
+                String dataCanon = dataDir.getCanonicalPath();
+                if (canon.equals(dataCanon)
+                        || canon.startsWith(dataCanon + sep + "shared_prefs")
+                        || canon.startsWith(dataCanon + sep + "databases")
+                        || canon.startsWith(dataCanon + sep + "code_cache")
+                        || canon.startsWith(dataCanon + sep + "no_backup")
+                        || canon.startsWith(dataCanon + sep + "files")) {
+                    return false;
+                }
+            }
+            java.util.List<File> roots = new java.util.ArrayList<>();
+            if (ctx.getCacheDir() != null) roots.add(ctx.getCacheDir());
+            if (ctx.getExternalCacheDir() != null) roots.add(ctx.getExternalCacheDir());
+            File extFiles = ctx.getExternalFilesDir(null);
+            if (extFiles != null) roots.add(extFiles);
+            try {
+                File extRoot = android.os.Environment.getExternalStorageDirectory();
+                if (extRoot != null) roots.add(extRoot);
+            } catch (Throwable ignored) {}
+            for (File r : roots) {
+                if (r == null) continue;
+                String rc = r.getCanonicalPath();
+                if (canon.startsWith(rc + sep)) return true;
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     public static Uri uriForFile(File file) {
         return new Uri.Builder()
@@ -30,12 +80,24 @@ public class ViewerFileProvider extends ContentProvider {
         return uriForFile(file);
     }
 
-    private File resolveFile(Uri uri) throws FileNotFoundException {
+    private File resolveFile(Uri uri, boolean allowMissingWriteTarget) throws FileNotFoundException {
         String p = uri.getQueryParameter("p");
         if (p == null || p.isEmpty()) throw new FileNotFoundException("Missing path");
         File f = new File(p);
-        if (!f.exists()) throw new FileNotFoundException("File not found: " + p);
+        android.content.Context ctx = getContext();
+        if (ctx != null && !isAllowedFile(ctx, f)) {
+            throw new SecurityException("Access denied outside allowed directories");
+        }
+        if (!f.exists()) {
+            if (allowMissingWriteTarget && isWriteAllowed(f)) return f;
+            throw new FileNotFoundException("File not found: " + p);
+        }
+        if (!f.isFile()) throw new FileNotFoundException("Not a regular file");
         return f;
+    }
+
+    private File resolveFile(Uri uri) throws FileNotFoundException {
+        return resolveFile(uri, false);
     }
 
     @Override
@@ -102,13 +164,16 @@ public class ViewerFileProvider extends ContentProvider {
 
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
-        File file = resolveFile(uri);
-        int fileMode = ParcelFileDescriptor.MODE_READ_ONLY;
-        if ("w".equals(mode) || "wt".equals(mode)) {
-            fileMode = ParcelFileDescriptor.MODE_WRITE_ONLY | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE;
-        } else if ("rw".equals(mode) || "rwt".equals(mode)) {
-            fileMode = ParcelFileDescriptor.MODE_READ_WRITE;
+        boolean wantsWrite = mode != null && (mode.contains("w") || mode.contains("W"));
+        File file = resolveFile(uri, wantsWrite);
+        if (wantsWrite) {
+            if (!isWriteAllowed(file)) {
+                throw new SecurityException("Write access denied for this URI");
+            }
+            int fileMode = ParcelFileDescriptor.MODE_WRITE_ONLY | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE;
+            if (mode.contains("r")) fileMode = ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE;
+            return ParcelFileDescriptor.open(file, fileMode);
         }
-        return ParcelFileDescriptor.open(file, fileMode);
+        return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
     }
 }

@@ -395,15 +395,40 @@ public final class Docs {
     }
 
     // ---------- XML / ZIP Helpers ----------
+    private static final int MAX_XML_BYTES = 16 * 1024 * 1024;
+
+    static DocumentBuilderFactory newSecureDocumentBuilderFactory() {
+        DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
+        f.setNamespaceAware(true);
+        f.setExpandEntityReferences(false);
+        try { f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); } catch (Throwable ignored) {}
+        try { f.setFeature("http://xml.org/sax/features/external-general-entities", false); } catch (Throwable ignored) {}
+        try { f.setFeature("http://xml.org/sax/features/external-parameter-entities", false); } catch (Throwable ignored) {}
+        try { f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false); } catch (Throwable ignored) {}
+        try { f.setXIncludeAware(false); } catch (Throwable ignored) {}
+        return f;
+    }
+
+    static byte[] readBounded(InputStream is, int maxBytes) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n, total = 0;
+        while ((n = is.read(buf)) > 0) {
+            total += n;
+            if (total > maxBytes) throw new IllegalStateException("Entry exceeds size limit");
+            bos.write(buf, 0, n);
+        }
+        return bos.toByteArray();
+    }
+
     static Document loadXml(ZipFile z, String name) {
         try {
             ZipEntry e = z.getEntry(name);
             if (e == null) return null;
-            DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
-            f.setNamespaceAware(true);
-            DocumentBuilder b = f.newDocumentBuilder();
+            DocumentBuilder b = newSecureDocumentBuilderFactory().newDocumentBuilder();
             try (InputStream is = z.getInputStream(e)) {
-                return b.parse(is);
+                byte[] xmlBytes = readBounded(is, MAX_XML_BYTES);
+                return b.parse(new ByteArrayInputStream(xmlBytes));
             }
         } catch (Exception e) {
             return null;

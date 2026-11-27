@@ -151,7 +151,7 @@ final class Dock extends FrameLayout {
         sub.setTextSize(Ui.sp(12f));
 
         // Exact Prism optical presets
-        barGlass.blurDp = 2.5f;
+        barGlass.blurDp = Ui.barBlur();
         barGlass.refractDp = 17f;
         barGlass.edgeDp = 26f;
         barGlass.outerDp = 7f;
@@ -159,15 +159,19 @@ final class Dock extends FrameLayout {
         barGlass.chroma = 0f;
         barGlass.vibrance = 1.35f;
         barGlass.rim = 0.32f;
+        barGlass.edgeDark = 0.32f;
+        barGlass.shadowAlpha = 0.16f;
 
-        miniGlass.blurDp = 2f;
+        miniGlass.blurDp = Ui.barBlur();
         miniGlass.refractDp = 17f;
         miniGlass.edgeDp = 24f;
         miniGlass.outerDp = 7f;
         miniGlass.outerRefractDp = 12f;
         miniGlass.chroma = 0f;
-        miniGlass.vibrance = 1.6f;
-        miniGlass.rim = 0.34f;
+        miniGlass.vibrance = 1.35f;
+        miniGlass.rim = 0.32f;
+        miniGlass.edgeDark = 0.32f;
+        miniGlass.shadowAlpha = 0.16f;
 
         lensGlass.blur = false;
         lensGlass.refractDp = 22f;
@@ -608,18 +612,18 @@ final class Dock extends FrameLayout {
 
         // Refracting & magnifying liquid lens floating on top of contentNode!
         lensGlass.shapes(lens, Math.min(lens.width(), lens.height()) / 2f, null, 0, null, 0);
-        lensGlass.mag = 1f + 0.18f * l;
+        lensGlass.mag = 1f + 0.14f * l;
         lensGlass.magX = lens.centerX();
         lensGlass.magY = lens.centerY();
         lensGlass.alpha = Ui.clamp(l * 1.4f, 0f, 1f);
-        lensGlass.refractDp = 16f;
-        lensGlass.edgeDp = 24f;
-        lensGlass.outerDp = 7.5f;
-        lensGlass.outerRefractDp = 13f;
-        lensGlass.depthEffect = 0.65f;
-        lensGlass.innerShadow = l;
-        lensGlass.chroma = 0.95f;
-        lensGlass.tint = Ui.dark ? 0x10FFFFFF : 0x0AFFFFFF;
+        lensGlass.refractDp = 22f;
+        lensGlass.edgeDp = 28f;
+        lensGlass.outerDp = 8f;
+        lensGlass.outerRefractDp = 14f;
+        lensGlass.chroma = 0.9f;
+        lensGlass.rim = 0.6f;
+        lensGlass.tint = Ui.dark ? 0x0FFFFFFF : 0x0AFFFFFF;
+        lensGlass.strokeColor = Ui.dark ? 0x40FFFFFF : 0x1A000000;
         lensGlass.pressX = touchX; lensGlass.pressY = touchY;
         lensGlass.pressR = Ui.dpf(42);
         lensGlass.pressAmt = barPress.value * 0.5f;

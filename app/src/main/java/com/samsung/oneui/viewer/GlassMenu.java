@@ -285,7 +285,9 @@ final class GlassMenu extends FrameLayout {
         glass.edgeDp = Ui.lerp(20f, 26f, k);
         glass.outerDp = Ui.lerp(5f, 7f, k);
         glass.outerRefractDp = Ui.lerp(11f, 12f, k);
-        glass.rim = Ui.lerp(0.32f, 0.42f, k);
+        glass.rim = Ui.lerp(0.32f, 0.40f, k);
+        glass.edgeDark = 0.32f;
+        glass.vibrance = 1.35f;
         glass.shadowAlpha = Ui.lerp(fromHeader ? 0.07f : 0f, 0.22f, k);
         glass.chroma = 0f;
         glass.alpha = fromHeader ? 1f : Ui.clamp(p.value / 0.1f, 0f, 1f);

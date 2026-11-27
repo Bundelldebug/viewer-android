@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
 final class Updater {
     private Updater() {}
 
-    static final String VERSION = "9.5.9";
+    static final String VERSION = "9.5.10";
     static final String REPO = "Bundelldebug/viewer-android";
     static final String PREF_AUTO = "update_auto";
     private static final long DAY = 24L * 60 * 60 * 1000;

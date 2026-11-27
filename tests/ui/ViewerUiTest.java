@@ -186,8 +186,8 @@ public class ViewerUiTest {
         assertTrue(Glass.SHADER.contains("outerRefr"));
         assertTrue(Glass.SHADER.contains("chroma"));
         assertTrue(Glass.SHADER.contains("smoothK"));
-        assertTrue(Glass.SHADER.contains("pressAmt"));
-        assertTrue(Glass.SHADER.contains("magCenter"));
+        assertTrue(Glass.SHADER.contains("press"));
+        assertTrue(Glass.SHADER.contains("magC"));
 
         // Verify lens starts at tab 0, then dragging across tabs lifts/expands the lens and targets slot 2
         assertEquals(0, a.dock.lensTargetSlot());

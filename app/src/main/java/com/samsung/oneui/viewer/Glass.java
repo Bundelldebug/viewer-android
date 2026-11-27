@@ -2,6 +2,7 @@ package com.samsung.oneui.viewer;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RecordingCanvas;
@@ -15,11 +16,8 @@ import android.view.View;
 import android.widget.FrameLayout;
 
 /**
- * Optical glass rendering engine inspired by Kyant0/AndroidLiquidGlass and MeiloX.
- * Combines analytic rounded-rect SDF, spherical {@code circleMap} lens refraction with
- * {@code depthEffect}, physically weighted 7-band spectral chromatic dispersion,
- * 45-degree directional rim highlight, vibrancy boost, inner shadow, and smooth-union
- * metaball morphing ({@code smin}) + touch bloom. Safely degrades on API 26–32.
+ * Optical Liquid Glass rendering engine unified to Prism's exact AGSL shader & optical parameters.
+ * Safely degrades on API 26-32.
  */
 final class Glass {
     private Glass() {}
@@ -28,122 +26,87 @@ final class Glass {
 
     static final String SHADER =
             "uniform shader content;\n" +
-            "uniform float2 iRes;\n" +
-            "uniform float4 s0, s1, s2;\n" +
-            "uniform float3 radii;\n" +
-            "uniform float smoothK, refr, edgeW, outerW, outerRefr, chroma, rim, vib, depthEff, innerShad;\n" +
-            "uniform float mag;\n" +
-            "uniform float2 magCenter;\n" +
+            "uniform float4 s0; uniform float s0r;\n" +
+            "uniform float4 s1; uniform float s1r;\n" +
+            "uniform float4 s2; uniform float s2r;\n" +
+            "uniform float smoothK;\n" +
+            "uniform float edgeW;\n" +
+            "uniform float refr;\n" +
+            "uniform float chroma;\n" +
             "uniform float4 tint;\n" +
-            "uniform float alpha, dark;\n" +
-            "uniform float2 pressPt;\n" +
-            "uniform float pressR, pressAmt;\n" +
-            "\n" +
-            "float rbox(float2 p, float4 b, float r) {\n" +
-            "    if (b.z <= 0.0 || b.w <= 0.0) return 1e5;\n" +
-            "    float rr = min(r, min(b.z, b.w));\n" +
-            "    float2 q = abs(p - b.xy) - (b.zw - float2(rr));\n" +
-            "    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - rr;\n" +
-            "}\n" +
-            "float2 gradSdRR(float2 cc, float2 hs, float rad) {\n" +
-            "    float2 corner = abs(cc) - (hs - float2(rad));\n" +
-            "    if (corner.x >= 0.0 || corner.y >= 0.0) {\n" +
-            "        float2 mc = max(corner, float2(0.0));\n" +
-            "        float ml = length(mc);\n" +
-            "        return ml > 1e-4 ? sign(cc) * (mc / ml) : float2(0.0);\n" +
-            "    } else {\n" +
-            "        float gx = step(corner.y, corner.x);\n" +
-            "        return sign(cc) * float2(gx, 1.0 - gx);\n" +
-            "    }\n" +
+            "uniform float rim;\n" +
+            "uniform float alphaMul;\n" +
+            "uniform float2 magC;\n" +
+            "uniform float mag;\n" +
+            "uniform float outerW;\n" +
+            "uniform float outerRefr;\n" +
+            "uniform float edgeDark;\n" +
+            "uniform float2 lightDir;\n" +
+            "uniform float vibrance;\n" +
+            "uniform float4 press;\n" +
+            "float sdRR(float2 p, float4 r, float rad) {\n" +
+            "  float2 hs = r.zw * 0.5;\n" +
+            "  float rr = min(rad, min(hs.x, hs.y));\n" +
+            "  float2 q = abs(p - (r.xy + hs)) - hs + float2(rr, rr);\n" +
+            "  return length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - rr;\n" +
             "}\n" +
             "float smin(float a, float b, float k) {\n" +
-            "    if (k <= 0.001) return min(a, b);\n" +
-            "    float h = max(k - abs(a - b), 0.0) / k;\n" +
-            "    return min(a, b) - h * h * k * 0.25;\n" +
+            "  if (k <= 0.0) { return min(a, b); }\n" +
+            "  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);\n" +
+            "  return mix(b, a, h) - k * h * (1.0 - h);\n" +
             "}\n" +
-            "float sdf(float2 p) {\n" +
-            "    float d = rbox(p, s0, radii.x);\n" +
-            "    d = smin(d, rbox(p, s1, radii.y), smoothK);\n" +
-            "    d = smin(d, rbox(p, s2, radii.z), smoothK);\n" +
-            "    return d;\n" +
+            "float scene(float2 p) {\n" +
+            "  float d = sdRR(p, s0, s0r);\n" +
+            "  if (s1.z > 0.5) { d = smin(d, sdRR(p, s1, s1r), smoothK); }\n" +
+            "  if (s2.z > 0.5) { d = smin(d, sdRR(p, s2, s2r), smoothK); }\n" +
+            "  return d;\n" +
             "}\n" +
-            "float circleMap(float x) {\n" +
-            "    float c = clamp(x, 0.0, 1.0);\n" +
-            "    return 1.0 - sqrt(max(0.0, 1.0 - c * c));\n" +
+            "float bevel(float depth, float width) {\n" +
+            "  float t = clamp(depth / max(width, 0.001), 0.0, 1.0);\n" +
+            "  return 1.0 - sqrt(1.0 - (1.0 - t) * (1.0 - t));\n" +
             "}\n" +
-            "half4 sampleC(float2 p) {\n" +
-            "    return content.eval(clamp(p, float2(0.5), iRes - float2(0.5)));\n" +
-            "}\n" +
+            "float4 look(float2 at) { return float4(content.eval(at)); }\n" +
             "half4 main(float2 p) {\n" +
-            "    float d = sdf(p);\n" +
-            "    float mask = clamp(0.5 - d, 0.0, 1.0);\n" +
-            "    if (mask <= 0.001) return half4(0.0);\n" +
-            "    float depth = max(-d, 0.0);\n" +
-            "    bool single = (s1.z <= 0.5 && s2.z <= 0.5);\n" +
-            "    float2 hs = max(s0.zw, float2(1.0));\n" +
-            "    float2 cc = p - s0.xy;\n" +
-            "    float2 gRim;\n" +
-            "    float2 n;\n" +
-            "    if (single) {\n" +
-            "        float gradR = min(radii.x * 1.5, min(hs.x, hs.y));\n" +
-            "        gRim = gradSdRR(cc, hs, gradR);\n" +
-            "        float cl = length(cc);\n" +
-            "        float2 radial = cl > 1e-4 ? (cc / cl) : float2(0.0);\n" +
-            "        float2 comb = gRim + depthEff * radial;\n" +
-            "        float cl2 = length(comb);\n" +
-            "        n = cl2 > 1e-4 ? (comb / cl2) : gRim;\n" +
-            "    } else {\n" +
-            "        float2 e = float2(1.0, 0.0);\n" +
-            "        float2 g = float2(sdf(p + e.xy) - sdf(p - e.xy), sdf(p + e.yx) - sdf(p - e.yx));\n" +
-            "        float gl = length(g);\n" +
-            "        gRim = gl > 1e-4 ? g / gl : float2(0.0, 1.0);\n" +
-            "        n = gRim;\n" +
-            "    }\n" +
-            "    float tIn = clamp(1.0 - depth / max(edgeW, 1.0), 0.0, 1.0);\n" +
-            "    float tOut = clamp(1.0 - depth / max(outerW, 1.0), 0.0, 1.0);\n" +
-            "    float bend = refr * circleMap(tIn) + outerRefr * circleMap(tOut) * tOut;\n" +
-            "    float2 baseP = magCenter + (p - magCenter) / max(mag, 0.01);\n" +
-            "    float2 off = n * bend;\n" +
-            "    float2 uv = baseP + off;\n" +
-            "    float3 rgb;\n" +
-            "    if (chroma > 0.005 && bend > 0.05) {\n" +
-            "        float cw = single ? clamp(abs((cc.x * cc.y) / max(hs.x * hs.y, 1.0)) * 1.45, 0.0, 1.0) : clamp(abs(gRim.x * gRim.y) * 2.0, 0.0, 1.0);\n" +
-            "        float2 disp = off * (chroma * (0.16 + 0.84 * cw));\n" +
-            "        float3 red = float3(sampleC(uv + disp).rgb);\n" +
-            "        float3 orange = float3(sampleC(uv + disp * 0.666667).rgb);\n" +
-            "        float3 yellow = float3(sampleC(uv + disp * 0.333333).rgb);\n" +
-            "        float3 green = float3(sampleC(uv).rgb);\n" +
-            "        float3 cyan = float3(sampleC(uv - disp * 0.333333).rgb);\n" +
-            "        float3 blue = float3(sampleC(uv - disp * 0.666667).rgb);\n" +
-            "        float3 purple = float3(sampleC(uv - disp).rgb);\n" +
-            "        rgb.r = (red.r + orange.r + yellow.r) / 3.5 + purple.r / 7.0;\n" +
-            "        rgb.g = orange.g / 7.0 + (yellow.g + green.g + cyan.g) / 3.5;\n" +
-            "        rgb.b = (cyan.b + blue.b + purple.b) / 3.0;\n" +
-            "    } else {\n" +
-            "        rgb = float3(sampleC(uv).rgb);\n" +
-            "    }\n" +
-            "    float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));\n" +
-            "    rgb = clamp(mix(float3(luma), rgb, vib), 0.0, 1.0);\n" +
-            "    rgb = mix(rgb, tint.rgb, tint.a);\n" +
-            "    if (innerShad > 0.001) {\n" +
-            "        float isBand = 1.0 - smoothstep(0.0, max(outerW * 2.2, 6.0), depth);\n" +
-            "        rgb *= (1.0 - innerShad * 0.14 * isBand);\n" +
-            "    }\n" +
-            "    float hd = dot(gRim, float2(0.7071, 0.7071));\n" +
-            "    float hiMag = pow(abs(hd), 1.35);\n" +
-            "    float shine = max(-hd, 0.0) * hiMag + 0.42 * max(hd, 0.0) * hiMag;\n" +
-            "    float edge = smoothstep(3.4, 0.0, depth);\n" +
-            "    float darkLine = smoothstep(-3.0, -1.2, d) * (1.0 - smoothstep(-1.2, 0.2, d));\n" +
-            "    rgb *= (1.0 - (dark > 0.5 ? 0.12 : 0.26) * darkLine * (1.0 - shine));\n" +
-            "    rgb = clamp(rgb + float3(edge * (0.22 + 0.88 * shine) * rim), 0.0, 1.0);\n" +
-            "    if (pressAmt > 0.001 && pressR > 1.0) {\n" +
-            "        float pd = length(p - pressPt) / pressR;\n" +
-            "        float glow = exp(-pd * pd * 1.35) * pressAmt;\n" +
-            "        float pEdge = edge * clamp(1.0 - pd * 0.7, 0.0, 1.0) * pressAmt;\n" +
-            "        rgb = mix(rgb, float3(1.0), clamp(glow * 0.44 + pEdge * 0.42, 0.0, 0.82));\n" +
-            "    }\n" +
-            "    float a = mask * alpha;\n" +
-            "    return half4(half3(rgb * a), half(a));\n" +
+            "  float d = scene(p);\n" +
+            "  if (d > 1.5) { return half4(0.0, 0.0, 0.0, 0.0); }\n" +
+            "  float2 g = float2(scene(p + float2(1.0, 0.0)) - scene(p - float2(1.0, 0.0)),\n" +
+            "                    scene(p + float2(0.0, 1.0)) - scene(p - float2(0.0, 1.0)));\n" +
+            "  float gl = length(g);\n" +
+            "  float2 n = float2(0.0, 0.0);\n" +
+            "  if (gl > 0.0001) { n = g / gl; }\n" +
+            "  float depth = max(-d, 0.0);\n" +
+            "  float lip = 1.0 - smoothstep(0.0, max(outerW, 0.001), depth);\n" +
+            "  float bend = refr * bevel(depth, edgeW) + outerRefr * bevel(depth, outerW) * lip;\n" +
+            "  float2 q = magC + (p - magC) / mag;\n" +
+            "  float2 off = n * bend;\n" +
+            "  float4 c = look(q + off);\n" +
+            "  if (chroma > 0.0 && bend > 0.05) {\n" +
+            "    float diag = clamp(abs(n.x * n.y) * 2.0, 0.0, 1.0);\n" +
+            "    float spread = chroma * (0.3 + 0.7 * diag);\n" +
+            "    float4 r1 = look(q + off * (1.0 - spread));\n" +
+            "    float4 r2 = look(q + off * (1.0 - 0.5 * spread));\n" +
+            "    float4 b1 = look(q + off * (1.0 + 0.5 * spread));\n" +
+            "    float4 b2 = look(q + off * (1.0 + spread));\n" +
+            "    c = float4((r1.r + r2.r) * 0.5, (r2.g + c.g * 2.0 + b1.g) * 0.25, (b1.b + b2.b) * 0.5, c.a);\n" +
+            "  }\n" +
+            "  float lum = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));\n" +
+            "  c.rgb = clamp(mix(float3(lum), c.rgb, vibrance), 0.0, 1.0);\n" +
+            "  c = float4(mix(c.rgb, tint.rgb, tint.a), mix(c.a, 1.0, tint.a));\n" +
+            "  if (press.w > 0.001) {\n" +
+            "    float2 k = (p - press.xy) / max(press.z, 1.0);\n" +
+            "    float bloom = exp(-0.5 * dot(k, k)) * press.w;\n" +
+            "    float3 lifted = c.rgb * 1.08 + float3(0.07);\n" +
+            "    c.rgb = mix(c.rgb, lifted, clamp(bloom + press.w * 0.25, 0.0, 1.0));\n" +
+            "  }\n" +
+            "  float line = smoothstep(-3.0, -1.2, d) * (1.0 - smoothstep(-1.2, 0.2, d));\n" +
+            "  float facing = max(dot(n, -lightDir), 0.0);\n" +
+            "  float back = max(dot(n, lightDir), 0.0);\n" +
+            "  float shine = facing * facing + 0.45 * back * back;\n" +
+            "  c.rgb = c.rgb * (1.0 - edgeDark * line * (1.0 - shine));\n" +
+            "  float rimMask = smoothstep(-3.5, 0.0, d) * (1.0 - smoothstep(0.0, 1.0, d));\n" +
+            "  c.rgb = c.rgb + float3(rim * rimMask * (0.25 + 0.75 * shine));\n" +
+            "  float a = clamp(0.5 - d, 0.0, 1.0) * alphaMul;\n" +
+            "  return half4(c * a);\n" +
             "}\n";
 
     static final class Backdrop extends FrameLayout {
@@ -199,29 +162,29 @@ final class Glass {
         private final RectF bounds = new RectF();
 
         float smoothK;
-        float blurDp = 2.5f;
-        float refractDp = 15f;
-        float edgeDp = 22f;
-        float outerDp = 5.5f;
-        float outerRefractDp = 11f;
-        float chroma = 0.75f;
-        float rim = 0.45f;
-        float vibrance = 1.30f;
-        float depthEffect = 0.38f;
-        float innerShadow = 0f;
+        float blurDp = 6f;
+        float refractDp = 17f;
+        float edgeDp = 26f;
+        float outerDp = 7f;
+        float outerRefractDp = 12f;
+        float chroma = 0f;
+        float rim = 0.32f;
+        float edgeDark = 0.32f;
+        float vibrance = 1.35f;
+        float lightX = -0.45f, lightY = -0.89f;
         float mag = 1f;
         float magX, magY;
         float pressX, pressY, pressR, pressAmt;
-        int tint = 0x52FFFFFF;
+        int tint = Ui.glassTint();
         float alpha = 1f;
-        float shadowAlpha = 0.14f;
-        int strokeColor = 0x26000000;
+        float shadowAlpha = 0.16f;
+        int strokeColor = Ui.glassStroke();
         boolean blur = true;
         Object extra;
 
         Surface() {
             nodeObj = Build.VERSION.SDK_INT >= 29 ? new RenderNode("glass-surface") : null;
-            shadowPaint.setColor(0x01000000);
+            shadowPaint.setColor(0x01FFFFFF);
             strokePaint.setStyle(Paint.Style.STROKE);
         }
 
@@ -243,10 +206,11 @@ final class Glass {
             if (bounds.isEmpty()) return;
 
             if (shadowAlpha > 0.005f) {
-                shadowPaint.setShadowLayer(Ui.dpf(13), 0, Ui.dpf(5), Ui.alpha(0xFF000000, shadowAlpha * alpha));
+                shadowPaint.setShadowLayer(Ui.dpf(14), 0, Ui.dpf(4), Ui.alpha(0xFF000000, shadowAlpha * alpha * (Ui.dark ? 2.2f : 1f)));
                 for (int i = 0; i < 3; i++) {
                     if (!shapes[i].isEmpty()) canvas.drawRoundRect(shapes[i], radii[i], radii[i], shadowPaint);
                 }
+                shadowPaint.clearShadowLayer();
             }
 
             if (Ui.gStyle) {
@@ -273,46 +237,46 @@ final class Glass {
 
         private void drawAgsl(Canvas canvas, View host, Backdrop backdrop) {
             if (Build.VERSION.SDK_INT < 33) return;
-            int pad = Math.round(Ui.dpf(refractDp + outerRefractDp + 6));
-            int l = Math.max(0, (int) Math.floor(bounds.left) - pad);
-            int t = Math.max(0, (int) Math.floor(bounds.top) - pad);
-            int r = Math.min(host.getWidth(), (int) Math.ceil(bounds.right) + pad);
-            int b = Math.min(host.getHeight(), (int) Math.ceil(bounds.bottom) + pad);
+            float pad = Ui.dpf(blurDp) * 2f + Ui.dpf(refractDp);
+            int l = (int) Math.floor(bounds.left - pad);
+            int t = (int) Math.floor(bounds.top - pad);
+            int r = (int) Math.ceil(bounds.right + pad);
+            int b = (int) Math.ceil(bounds.bottom + pad);
             int w = r - l, h = b - t;
             if (w <= 0 || h <= 0) return;
 
             try {
                 if (shaderObj == null) {
                     try { shaderObj = new RuntimeShader(SHADER); }
-                    catch (Throwable t1) { shaderObj = new RuntimeShader(SHADER.replace("content.eval(", "sample(content, ")); }
+                    catch (Throwable t1) { shaderObj = new RuntimeShader(SHADER.replace("content.eval(at)", "sample(content, at)")); }
                 }
                 RuntimeShader shader = (RuntimeShader) shaderObj;
-                shader.setFloatUniform("iRes", (float) w, (float) h);
                 for (int i = 0; i < 3; i++) {
                     RectF s = shapes[i];
-                    if (s.isEmpty()) shader.setFloatUniform("s" + i, 0f, 0f, 0f, 0f);
-                    else shader.setFloatUniform("s" + i, s.centerX() - l, s.centerY() - t, s.width() * 0.5f, s.height() * 0.5f);
+                    if (s.isEmpty()) {
+                        shader.setFloatUniform("s" + i, 0f, 0f, 0f, 0f);
+                        shader.setFloatUniform("s" + i + "r", 0f);
+                    } else {
+                        shader.setFloatUniform("s" + i, s.left - l, s.top - t, s.width(), s.height());
+                        shader.setFloatUniform("s" + i + "r", Math.min(radii[i], s.height() / 2f));
+                    }
                 }
-                shader.setFloatUniform("radii", radii[0], radii[1], radii[2]);
                 shader.setFloatUniform("smoothK", smoothK);
-                shader.setFloatUniform("refr", Ui.dpf(refractDp));
                 shader.setFloatUniform("edgeW", Ui.dpf(edgeDp));
-                shader.setFloatUniform("outerW", Ui.dpf(outerDp));
-                shader.setFloatUniform("outerRefr", Ui.dpf(outerRefractDp));
+                shader.setFloatUniform("refr", Ui.dpf(refractDp));
                 shader.setFloatUniform("chroma", chroma);
-                shader.setFloatUniform("rim", rim);
-                shader.setFloatUniform("vib", vibrance);
-                shader.setFloatUniform("depthEff", depthEffect);
-                shader.setFloatUniform("innerShad", innerShadow);
-                shader.setFloatUniform("mag", mag);
-                shader.setFloatUniform("magCenter", (magX == 0 ? bounds.centerX() : magX) - l, (magY == 0 ? bounds.centerY() : magY) - t);
                 int tc = tint;
                 shader.setFloatUniform("tint", ((tc >> 16) & 255) / 255f, ((tc >> 8) & 255) / 255f, (tc & 255) / 255f, (tc >>> 24) / 255f);
-                shader.setFloatUniform("alpha", alpha);
-                shader.setFloatUniform("dark", Ui.dark ? 1f : 0f);
-                shader.setFloatUniform("pressPt", pressX - l, pressY - t);
-                shader.setFloatUniform("pressR", pressR);
-                shader.setFloatUniform("pressAmt", pressAmt);
+                shader.setFloatUniform("rim", rim);
+                shader.setFloatUniform("alphaMul", alpha);
+                shader.setFloatUniform("magC", (magX == 0 ? bounds.centerX() : magX) - l, (magY == 0 ? bounds.centerY() : magY) - t);
+                shader.setFloatUniform("mag", Math.max(0.2f, mag));
+                shader.setFloatUniform("outerW", Ui.dpf(outerDp));
+                shader.setFloatUniform("outerRefr", Ui.dpf(outerRefractDp));
+                shader.setFloatUniform("edgeDark", Ui.dark ? edgeDark * 0.4f : edgeDark);
+                shader.setFloatUniform("lightDir", lightX, lightY);
+                shader.setFloatUniform("vibrance", vibrance);
+                shader.setFloatUniform("press", pressX - l, pressY - t, Math.max(1f, pressR), pressAmt);
 
                 RenderEffect fx = RenderEffect.createRuntimeShaderEffect(shader, "content");
                 if (blur && blurDp > 0.2f) {
@@ -345,7 +309,7 @@ final class Glass {
 
                 if (strokeColor != 0 && smoothK <= 0.5f) {
                     strokePaint.setColor(Ui.alpha(strokeColor, alpha));
-                    strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.55f)));
+                    strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.6f)));
                     for (int i = 0; i < 3; i++) {
                         if (!shapes[i].isEmpty()) canvas.drawRoundRect(shapes[i], radii[i], radii[i], strokePaint);
                     }
@@ -452,20 +416,15 @@ final class Glass {
         }
 
         private void drawFallback(Canvas canvas) {
-            int col = Ui.dark ? 0xD91C1C1E : 0xEBFAFAFC;
+            int col = Ui.mix(Ui.bg(), tint | 0xFF000000, 0.55f);
             if ((tint >>> 24) < 0x30) col = Ui.dark ? 0x26FFFFFF : 0x22000000;
-            fallbackPaint.setColor(Ui.alpha(col, alpha));
+            fallbackPaint.setColor(Ui.alpha(col, 0.96f * alpha));
             strokePaint.setColor(Ui.alpha(strokeColor == 0 ? Ui.glassStroke() : strokeColor, alpha));
-            strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.75f)));
+            strokePaint.setStrokeWidth(Math.max(1f, Ui.dpf(0.6f)));
             for (int i = 0; i < 3; i++) {
                 if (!shapes[i].isEmpty()) {
                     canvas.drawRoundRect(shapes[i], radii[i], radii[i], fallbackPaint);
                     canvas.drawRoundRect(shapes[i], radii[i], radii[i], strokePaint);
-                    if (pressAmt > 0.01f && pressR > 1f) {
-                        fallbackPaint.setColor(Ui.alpha(Ui.dark ? 0x44FFFFFF : 0x24000000, pressAmt * alpha));
-                        canvas.drawRoundRect(shapes[i], radii[i], radii[i], fallbackPaint);
-                        fallbackPaint.setColor(Ui.alpha(col, alpha));
-                    }
                 }
             }
         }

@@ -55,18 +55,24 @@ final class Header extends View {
         titlePaint.setTextSize(Ui.sp(17));
         mask.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
 
-        pillGlass.blurDp = 10;
+        pillGlass.blurDp = Ui.barBlur();
         pillGlass.refractDp = 15;
         pillGlass.edgeDp = 20;
+        pillGlass.outerDp = 5;
         pillGlass.outerRefractDp = 11;
         pillGlass.vibrance = 1.35f;
         pillGlass.rim = 0.32f;
+        pillGlass.edgeDark = 0.32f;
         pillGlass.shadowAlpha = 0.07f;
 
-        backGlass.blurDp = 10;
-        backGlass.refractDp = 6;
-        backGlass.edgeDp = 12;
-        backGlass.rim = 0.25f;
+        backGlass.blurDp = Ui.barBlur();
+        backGlass.refractDp = 15;
+        backGlass.edgeDp = 20;
+        backGlass.outerDp = 5;
+        backGlass.outerRefractDp = 11;
+        backGlass.vibrance = 1.35f;
+        backGlass.rim = 0.32f;
+        backGlass.edgeDark = 0.32f;
         backGlass.shadowAlpha = 0.07f;
 
         press.onUpdate = this::invalidate;

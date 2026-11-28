@@ -57,10 +57,10 @@ try {
         [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Assets,$_.FullName,$Entry) | Out-Null
     }
 } finally { $Assets.Dispose() }
-& (Join-Path $JavaHome 'bin/java.exe') '--add-opens=java.base/java.io=ALL-UNNAMED' "-Duser.home=$Cache/home" "-Dmaven.repo.local=$Cache/m2" "-Djava.io.tmpdir=$NativeTemp" "-XX:ErrorFile=$NativeTemp/hs_err_pid%p.log" '-Drobolectric.dependency.repo.url=https://repo.maven.apache.org/maven2' "-Dviewer.assets=$AssetApk" "-Dviewer.output=$Cache/output" -cp $RuntimeClasspath org.junit.runner.JUnitCore com.samsung.oneui.viewer.ViewerUiTest
+& (Join-Path $JavaHome 'bin/java.exe') '--add-opens=java.base/java.io=ALL-UNNAMED' "-Duser.home=$Cache/home" "-Dmaven.repo.local=$Cache/m2" "-Djava.io.tmpdir=$NativeTemp" "-XX:ErrorFile=$NativeTemp/hs_err_pid%p.log" '-Drobolectric.dependency.repo.url=https://repo.maven.apache.org/maven2' "-Dviewer.assets=$AssetApk" "-Dviewer.output=$Cache/output" -cp $RuntimeClasspath org.junit.runner.JUnitCore com.samsung.oneui.viewer.ViewerUiTest | Tee-Object -FilePath (Join-Path $Cache 'junit.log')
 if ($LASTEXITCODE -ne 0) { throw 'Native Android UI checks failed' }
 $Report = [ordered]@{
-    version='9.5.4';appName='뷰어';nativeGraphics=$true;androidApi=34;physicalDevice=$false
+    version='9.5 A1A1';appName='뷰어';nativeGraphics=$true;androidApi=34;physicalDevice=$false
     tests=([regex]::Matches([IO.File]::ReadAllText((Join-Path $UiRoot 'ViewerUiTest.java')),'@Test\b')).Count
     passed=$true;checkedAt=(Get-Date).ToString('o');screenshots=(Get-ChildItem (Join-Path $Cache 'output') -Filter '*.png' | ForEach-Object Name)
 }

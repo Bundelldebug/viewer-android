@@ -174,7 +174,15 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
     private Sidebar sidebar;
     private View dropOverlay;
 
-    private final Page[] pages = new Page[4];
+    /** 0 최근 항목 · 1 document · 2 둘러보기 · 3 설정 · 4 공유됨 */
+    private final Page[] pages = new Page[5];
+    private Pages.SharedPage sharedPage;
+    /** Where back from the document screen / settings returns to. */
+    private int docReturnTab = 0, settingsReturnTab = 0;
+    /** Document tools currently on the dock (index = Dock tool slot). */
+    private Dock.ToolSlot[] currentTools = new Dock.ToolSlot[0];
+    /** The markup palette is folded away (the pencil button brings it back). */
+    private boolean markupPaletteHidden;
     private Pages.HomePage homePage;
     private Pages.StagePage stagePage;
     private Pages.FilesPage filesPage;
@@ -326,6 +334,8 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
         pages[1] = stagePage;
         pages[2] = filesPage;
         pages[3] = settingsPage;
+        sharedPage = new Pages.SharedPage(this);
+        pages[4] = sharedPage;
         for (Page p : pages) {
             p.setVisibility(View.GONE);
             pageHost.addView(p, match());
@@ -380,7 +390,7 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
             }
         });
 
-        int initialTab = Math.min(3, Math.max(0, tab));
+        int initialTab = Math.min(4, Math.max(0, tab));
         if (!hasOpenFile() && initialTab == 1) initialTab = 0;
         tab = initialTab;
         pages[tab].setVisibility(View.VISIBLE);
@@ -416,7 +426,8 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
     private int headerHeight() {
         int W = root != null && root.getWidth() > 0 ? root.getWidth() : Ui.screenW;
         int H = root != null && root.getHeight() > 0 ? root.getHeight() : Ui.screenH;
-        return Ui.statusInset + Ui.dp(Dock.railFor(W, H) ? 172 : 88);
+        // foldable: the right-hand column holds back + up to four document buttons
+        return Ui.statusInset + Ui.dp(Dock.railFor(W, H) ? 320 : 88);
     }
 
     private void fitHeader() {
@@ -635,12 +646,18 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
                 syncChromeState();
                 return;
             }
-            switchTab(0);
+            // like a document app: back leaves (closes) the document and returns to where it was opened from
+            closeCurrentFile();
             return;
         }
+        if (tab == 3) { switchTab(settingsReturnTab); return; }
         if (tab != 0) { switchTab(0); return; }
         guardChanges(this::finish);
     }
+
+    int currentTab() { return tab; }
+    File sharedDir() { return inboxDir; }
+    Pages.HomePage homePageRef() { return homePage; }
 
     // ---- Navigation & Prism Chrome Coordination ----
     boolean hasOpenFile() { return currentPath != null && !currentPath.isEmpty(); }
@@ -671,8 +688,12 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
         if (filesPage != null) filesPage.setFilter(filterIdx);
     }
 
+    void openSettings() { switchTab(3); }
+
     void switchTab(int i) {
-        i = Math.max(0, Math.min(3, i));
+        i = Math.max(0, Math.min(4, i));
+        if (i == 1 && tab != 1) docReturnTab = (tab == 3 || tab == 1) ? docReturnTab : tab;
+        if (i == 3 && tab != 3) settingsReturnTab = (tab == 1 || tab == 3) ? 0 : tab;
         if (i == tab && !searching) {
             if (pages[i] != null) pages[i].scrollToTop();
             return;
@@ -726,19 +747,24 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
     void syncChromeState() {
         if (header == null || dock == null) return;
         Page p = currentPage();
+        boolean railUi = Dock.railFor(root.getWidth() > 0 ? root.getWidth() : Ui.screenW, root.getHeight() > 0 ? root.getHeight() : Ui.screenH);
         if (p == stagePage) {
             String t = hasOpenFile() ? ((isModified ? "● " : "") + new File(currentPath).getName()) : "보기";
             stagePage.title = t;
-            stagePage.back = hasOpenFile();
-            stagePage.headerIcons = hasOpenFile() ? new int[]{Icons.INFO, Icons.MORE} : new int[]{Icons.OPEN_FILE, Icons.MORE};
+            stagePage.back = true;
+            stagePage.headerIcons = hasOpenFile() ? docHeaderIcons(railUi) : new int[]{Icons.OPEN_FILE, Icons.MORE};
         }
+        if (p == homePage) homePage.headerIcons = railUi ? new int[]{Icons.GRID, Icons.MORE} : new int[0];
+        settingsPage.back = true;
         header.configure(p.title, p.headerIcons, p.back);
+        boolean docScreen = p == stagePage && hasOpenFile();
+        header.configureDoc(docScreen, docScreen && "pdf".equals(currentKind), docScreen && markupOn() ? Icons.MARKUP : -1);
         updateScrollChrome(p);
 
-        Dock.ToolSlot[] slots = buildToolSlots();
-        String name = hasOpenFile() ? new File(currentPath).getName() : "";
-        String meta = buildFileMetaSummary();
-        dock.setFileState(hasOpenFile(), tab == 1, name, meta, Pages.iconForKind(currentKind), isModified, slots);
+        int[] groups = new int[1];
+        currentTools = buildDocTools(railUi, groups);
+        int[] grp = docToolGroups;
+        dock.setTools(hasOpenFile() && tab == 1, currentTools, grp);
         refreshSubToolBar();
         applyAllPageInsets();
     }
@@ -765,6 +791,141 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
             return pos + Util.extOf(currentPath).toUpperCase(Locale.ROOT).replace(".", "") + " · " + Math.round(nativeDocView.getZoomScale() * 100f) + "%";
         }
         return pos + fmtBytes(f.length());
+    }
+
+    boolean markupOn() { return stageCanvasView != null && "markup".equals(stageCanvasView.getActiveTool()); }
+
+    /** The document's glass buttons at the top right (phone: one row; foldable: under the back button). */
+    private int[] docHeaderIcons(boolean railUi) {
+        if ("pdf".equals(currentKind)) return railUi ? new int[]{Icons.INFO, Icons.SHARE, Icons.SEARCH, Icons.MORE} : new int[]{Icons.MORE};
+        if ("image".equals(currentKind)) return new int[]{Icons.MARKUP, Icons.INFO, Icons.SHARE, Icons.MORE};
+        return new int[]{Icons.INFO, Icons.SHARE, Icons.MORE};
+    }
+
+    private int[] docToolGroups = {0};
+
+    /** The document's tool capsules at the bottom (split into glass groups). */
+    private Dock.ToolSlot[] buildDocTools(boolean railUi, int[] unused) {
+        List<Dock.ToolSlot> s = new ArrayList<>();
+        List<Integer> g = new ArrayList<>();
+        String activeTool = stageCanvasView != null ? stageCanvasView.getActiveTool() : "hand";
+        boolean mk = "markup".equals(activeTool);
+        if ("pdf".equals(currentKind)) {
+            String kind = stageCanvasView.getMarkupKind();
+            s.add(new Dock.ToolSlot(Icons.MARKUP, "마크업", mk && !"select".equals(kind) && !"text".equals(kind) && !"sign".equals(kind)));
+            s.add(new Dock.ToolSlot(Icons.FORM, "양식 채우기", mk && ("text".equals(kind) || "sign".equals(kind))));
+            s.add(new Dock.ToolSlot(Icons.SELECT, "선택", mk && "select".equals(kind)));
+            g.add(3);
+            if (!railUi) {
+                s.add(new Dock.ToolSlot(Icons.INFO, "정보", false));
+                s.add(new Dock.ToolSlot(Icons.SHARE, "공유", false));
+                s.add(new Dock.ToolSlot(Icons.SEARCH, "찾기", false));
+                g.add(3);
+            }
+        } else if ("image".equals(currentKind)) {
+            if (mk) {
+                s.add(new Dock.ToolSlot(Icons.PEN, "도구", !markupPaletteHidden));
+                g.add(1);
+            } else {
+                boolean editOn = "crop".equals(activeTool) || "adjust".equals(activeTool) || "alpha".equals(activeTool) || "select".equals(activeTool);
+                s.add(new Dock.ToolSlot(Icons.CROP, "편집", editOn));
+                g.add(1);
+                s.add(new Dock.ToolSlot(Icons.OCR, "텍스트 인식", !currentOcrBoxes.isEmpty()));
+                g.add(1);
+            }
+        } else if ("doc".equals(currentKind)) {
+            boolean ed = nativeDocView != null && nativeDocView.isEditing();
+            s.add(new Dock.ToolSlot(Icons.EDIT, ed ? "완료" : "편집", ed));
+            if (ed) s.add(new Dock.ToolSlot(Icons.UNDO, "취소", false));
+            g.add(ed ? 2 : 1);
+            s.add(new Dock.ToolSlot(Icons.SEARCH, "찾기", false));
+            g.add(1);
+        } else if ("media".equals(currentKind)) {
+            s.add(new Dock.ToolSlot(Icons.PREV, "이전", false));
+            s.add(new Dock.ToolSlot(Icons.NEXT, "다음", false));
+            g.add(2);
+            boolean bm = bookmarks.contains(currentPath);
+            s.add(new Dock.ToolSlot(bm ? Icons.BOOKMARK_FILL : Icons.BOOKMARK, "책갈피", bm));
+            g.add(1);
+        }
+        docToolGroups = new int[g.size()];
+        for (int i = 0; i < g.size(); i++) docToolGroups[i] = g.get(i);
+        return s.toArray(new Dock.ToolSlot[0]);
+    }
+
+    /** Turns markup on (with the last pen) or off. */
+    private void toggleMarkup() {
+        if (markupOn()) { setTool("hand"); return; }
+        String k = stageCanvasView.getMarkupKind();
+        if (k == null || "select".equals(k) || "text".equals(k) || "sign".equals(k)) applyMarkupKind("pen");
+        markupPaletteHidden = false;
+        setTool("markup");
+    }
+
+    /** Fill & sign: text box or signature. */
+    private void showFormMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("텍스트 상자 추가", Icons.TEXT_ADD, false, () -> { applyMarkupKind("text"); markupPaletteHidden = false; setTool("markup"); }),
+                new GlassMenu.Entry("서명 추가", Icons.SIGN, false, () -> { applyMarkupKind("sign"); markupPaletteHidden = false; setTool("markup"); })
+        );
+        GlassMenu.show(this, anchor, list);
+    }
+
+    /** The document title's menu (the chevron next to the name). */
+    private void showTitleMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = new ArrayList<>();
+        list.add(new GlassMenu.Entry("이름 바꾸기", Icons.EDIT, false, this::showRenameDialog));
+        list.add(new GlassMenu.Entry("정보", Icons.INFO, false, this::showFileInfoDialog));
+        list.add(new GlassMenu.Entry("저장", Icons.SAVE, isModified, () -> saveCurrentFile(false)));
+        list.add(new GlassMenu.Entry("다른 이름으로 저장 · 변환", Icons.EXPORT, false, () -> showExportGlassMenu(anchor)));
+        list.add(new GlassMenu.Entry("인쇄", Icons.PRINT, false, this::printCurrentFile));
+        boolean bm = bookmarks.contains(currentPath);
+        list.add(new GlassMenu.Entry(bm ? "책갈피 제거" : "책갈피 추가", bm ? Icons.BOOKMARK_FILL : Icons.BOOKMARK, bm, () -> toggleBookmark(currentPath)));
+        GlassMenu.show(this, anchor, list);
+    }
+
+    /** One action of the document screen, from the header buttons or the bottom tool capsules. */
+    private boolean docAction(int icon, RectF anchor) {
+        if (!hasOpenFile()) return false;
+        switch (icon) {
+            case Icons.MARKUP:
+                if ("pdf".equals(currentKind) && markupOn()) {
+                    String k = stageCanvasView.getMarkupKind();
+                    if ("select".equals(k) || "text".equals(k) || "sign".equals(k)) { applyMarkupKind("pen"); markupPaletteHidden = false; syncChromeState(); return true; }
+                }
+                toggleMarkup();
+                return true;
+            case Icons.PEN: markupPaletteHidden = !markupPaletteHidden; syncChromeState(); return true;
+            case Icons.FORM: showFormMenu(anchor); return true;
+            case Icons.SELECT:
+                if ("pdf".equals(currentKind)) {
+                    if (markupOn() && "select".equals(stageCanvasView.getMarkupKind())) setTool("hand");
+                    else { applyMarkupKind("select"); markupPaletteHidden = true; setTool("markup"); }
+                } else setTool("select".equals(stageCanvasView.getActiveTool()) ? "hand" : "select");
+                return true;
+            case Icons.INFO: showFileInfoDialog(); return true;
+            case Icons.SHARE: shareCurrentFile(); return true;
+            case Icons.SEARCH: onSearch(); return true;
+            case Icons.CROP: showImageEditMenu(anchor); return true;
+            case Icons.OCR: showOcrMenu(anchor); return true;
+            case Icons.EDIT:
+                if (!nativeDocView.canEdit()) { toast("이 문서 형식은 읽기 전용입니다"); return true; }
+                nativeDocView.setEditing(!nativeDocView.isEditing());
+                syncChromeState();
+                return true;
+            case Icons.UNDO:
+                if ("doc".equals(currentKind)) nativeDocView.undo();
+                else if ("pdf".equals(currentKind)) undoPdf(false);
+                else undoImageEdit();
+                return true;
+            case Icons.PREV: navigateFile(-1); return true;
+            case Icons.NEXT: navigateFile(1); return true;
+            case Icons.BOOKMARK:
+            case Icons.BOOKMARK_FILL: toggleBookmark(currentPath); syncChromeState(); return true;
+            case Icons.SIDEBAR: if ("pdf".equals(currentKind)) showPdfMenu(anchor); return true;
+            case Icons.CHEVRON_DOWN: showTitleMenu(anchor); return true;
+        }
+        return false;
     }
 
     private Dock.ToolSlot[] buildToolSlots() {
@@ -819,28 +980,46 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
         }
         String tool = stageCanvasView.getActiveTool();
         if ("markup".equals(tool)) {
-            stagePage.subToolHost.setVisibility(View.VISIBLE);
+            // bottom markup palette (undo · redo | pens | colours | +), folded away with the pencil button
+            stagePage.setSubAtBottom(true);
             String cur = stageCanvasView.getMarkupKind();
-            String[][] kinds = {{"pen", "펜"}, {"hl", "형광"}, {"arrow", "화살"}, {"rect", "사각"}, {"ellipse", "원"}, {"text", "글자"}, {"sign", "서명"}, {"redact", "가림"}, {"select", "선택"}};
-            for (String[] k : kinds) {
-                row.addView(subChip(k[1], k[0].equals(cur), v -> { applyMarkupKind(k[0]); refreshSubToolBar(); }));
+            if (markupPaletteHidden || "select".equals(cur)) { stagePage.subToolHost.setVisibility(View.GONE); stagePage.applyInsets(); return; }
+            stagePage.subToolHost.setVisibility(View.VISIBLE);
+            boolean pdf = "pdf".equals(currentKind);
+            row.addView(paletteIcon(Icons.UNDO, false, v -> { if (pdf) undoPdf(false); else undoImageEdit(); }));
+            row.addView(paletteIcon(Icons.REDO, false, v -> { if (pdf) undoPdf(true); else redoImageEdit(); }));
+            row.addView(paletteDivider());
+            Object[][] kinds = {{"pen", Icons.PEN}, {"hl", Icons.HIGHLIGHT}, {"arrow", Icons.SHAPES}, {"text", Icons.TEXT_ADD}, {"sign", Icons.SIGN}};
+            for (Object[] k : kinds) {
+                String kind = (String) k[0];
+                row.addView(paletteIcon((Integer) k[1], kind.equals(cur), v -> { applyMarkupKind(kind); refreshSubToolBar(); syncChromeState(); }));
             }
-            int[] colors = {0xFFE53935, 0xFF0381FE, 0xFF28B457, 0xFFF2C94C, 0xFF111111, 0xFFFFFFFF};
+            row.addView(paletteDivider());
+            int[] colors = {0xFF111111, 0xFF0381FE, 0xFF28B457, 0xFFE53935, 0xFFF2C94C, 0xFFFFFFFF};
             for (int col : colors) {
                 View sw = new View(this);
+                boolean on = stageCanvasView.getMarkupColor() == col;
                 GradientDrawable d = Ui.round(col, 100);
-                d.setStroke(Ui.dp(stageCanvasView.getMarkupColor() == col ? 2.5f : 1f),
-                        stageCanvasView.getMarkupColor() == col ? Ui.ACCENT : 0x55888888);
+                d.setStroke(Ui.dp(on ? 3f : 1f), on ? Ui.ACCENT : 0x55888888);
                 sw.setBackground(d);
                 sw.setOnClickListener(v -> { applyMarkupColor(col); refreshSubToolBar(); });
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(24), Ui.dp(24));
-                lp.leftMargin = Ui.dp(4); lp.rightMargin = Ui.dp(4);
+                Ui.press(sw, 0.9f);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(on ? 28 : 24), Ui.dp(on ? 28 : 24));
+                lp.leftMargin = Ui.dp(5); lp.rightMargin = Ui.dp(5);
                 row.addView(sw, lp);
             }
-            row.addView(subChip("취소", false, v -> { if ("pdf".equals(currentKind)) undoPdf(false); else undoImageEdit(); }));
-            row.addView(subChip("완료", true, v -> setTool("hand")));
+            TextView plus = Ui.text(this, "+", 22, Ui.regular, Ui.text());
+            plus.setGravity(Gravity.CENTER);
+            plus.setBackground(Ui.round(Ui.dark ? 0x26FFFFFF : 0x12000000, 100));
+            plus.setOnClickListener(v -> showMarkupShapesMenu(Glass.absRect(v)));
+            Ui.press(plus, 0.9f);
+            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(Ui.dp(34), Ui.dp(34));
+            plp.leftMargin = Ui.dp(6); plp.rightMargin = Ui.dp(2);
+            row.addView(plus, plp);
+            stagePage.applyInsets();
             return;
         }
+        stagePage.setSubAtBottom(false);
         if ("crop".equals(tool)) {
             stagePage.subToolHost.setVisibility(View.VISIBLE);
             row.addView(subChip("자유", false, v -> stageCanvasView.setCropAspect(0f)));
@@ -872,6 +1051,37 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
             return;
         }
         stagePage.subToolHost.setVisibility(View.GONE);
+    }
+
+    private View paletteIcon(int icon, boolean active, View.OnClickListener click) {
+        Icons.IconView iv = new Icons.IconView(this, icon, 22, active ? 0xFFFFFFFF : Ui.text());
+        if (active) iv.setBackground(Ui.round(Ui.ACCENT, 100));
+        iv.setOnClickListener(click);
+        Ui.press(iv, 0.9f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(40), Ui.dp(40));
+        lp.leftMargin = Ui.dp(1); lp.rightMargin = Ui.dp(1);
+        iv.setLayoutParams(lp);
+        return iv;
+    }
+
+    private View paletteDivider() {
+        View d = new View(this);
+        d.setBackgroundColor(Ui.dark ? 0x33FFFFFF : 0x22000000);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Math.max(1, Ui.dp(1)), Ui.dp(22));
+        lp.leftMargin = Ui.dp(6); lp.rightMargin = Ui.dp(6);
+        d.setLayoutParams(lp);
+        return d;
+    }
+
+    private void showMarkupShapesMenu(RectF anchor) {
+        List<GlassMenu.Entry> list = Arrays.asList(
+                new GlassMenu.Entry("사각형", Icons.SHAPES, false, () -> { applyMarkupKind("rect"); refreshSubToolBar(); }),
+                new GlassMenu.Entry("원", Icons.SHAPES, false, () -> { applyMarkupKind("ellipse"); refreshSubToolBar(); }),
+                new GlassMenu.Entry("선", Icons.PEN, false, () -> { applyMarkupKind("line"); refreshSubToolBar(); }),
+                new GlassMenu.Entry("가리기", Icons.CROP, false, () -> { applyMarkupKind("redact"); refreshSubToolBar(); }),
+                new GlassMenu.Entry("선택", Icons.SELECT, false, () -> { applyMarkupKind("select"); refreshSubToolBar(); syncChromeState(); })
+        );
+        GlassMenu.show(this, anchor, list);
     }
 
     private TextView subChip(String label, boolean active, View.OnClickListener click) {
@@ -919,6 +1129,10 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
     @Override public void onToolAction(int slotIndex, RectF anchor) {
         if (!hasOpenFile()) return;
+        if (slotIndex >= 0 && slotIndex < currentTools.length && currentTools[slotIndex] != null) {
+            docAction(currentTools[slotIndex].icon, anchor);
+            return;
+        }
         if ("doc".equals(currentKind)) {
             switch (slotIndex) {
                 case 0:
@@ -1073,10 +1287,20 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
 
     // ---- Header.Listener ----
     @Override public void onBack() {
+        // the header's back button leaves the document right away (system back steps out of a tool first)
+        if (tab == 1 && hasOpenFile()) {
+            GlassMenu.dismissAny(root);
+            if (searching) onExitSearch();
+            if ("doc".equals(currentKind) && nativeDocView.isEditing()) nativeDocView.setEditing(false);
+            closeCurrentFile();
+            return;
+        }
         onBackPressed();
     }
 
     @Override public void onHeaderButton(int icon, RectF anchor) {
+        if (tab == 1 && hasOpenFile() && icon != Icons.MORE && docAction(icon, anchor)) return;
+        if (icon == Icons.GRID) { if (homePage != null) homePage.toggleLayout(); return; }
         if (icon == Icons.OPEN_FILE) { launchSystemFilePicker(); return; }
         if (icon == Icons.FOLDER) { chooseFolder(); return; }
         if (icon == Icons.INFO) { showFileInfoDialog(); return; }
@@ -1092,7 +1316,11 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
         list.add(new GlassMenu.Entry("폴더 열기", Icons.FOLDER, false, this::chooseFolder));
         list.add(new GlassMenu.Entry("화면 캡처", Icons.CAPTURE, false, this::launchScreenCapture));
         list.add(new GlassMenu.Entry("붙여넣기", Icons.PASTE, false, this::pasteClipboardImage));
-        if (hasOpenFile()) {
+        if (!hasOpenFile() || tab != 1) {
+            list.add(new GlassMenu.Entry("예제 파일 체험", Icons.OPEN_FILE, false, this::openSampleFiles));
+            list.add(new GlassMenu.Entry("설정", Icons.SETTINGS, false, this::openSettings));
+        }
+        if (hasOpenFile() && tab == 1) {
             list.add(new GlassMenu.Entry("저장", Icons.SAVE, isModified, () -> saveCurrentFile(false)));
             list.add(new GlassMenu.Entry("다른 이름으로 저장 · 변환", Icons.EXPORT, false, () -> showExportGlassMenu(anchor)));
             if ("image".equals(currentKind) || "pdf".equals(currentKind)) {
@@ -1627,8 +1855,9 @@ public final class MainActivity extends Activity implements Dock.Listener, Heade
             imgUndoStack.clear(); imgRedoStack.clear();
             pdfUndo.clear(); pdfRedo.clear();
             attachActiveStageView();
-            switchTab(0);
+            switchTab(docReturnTab == 1 || docReturnTab == 3 ? 0 : docReturnTab);
             if (homePage != null) homePage.rebuild();
+            if (sharedPage != null) sharedPage.rebuild();
             if (filesPage != null) filesPage.refresh();
             syncChromeState();
         });

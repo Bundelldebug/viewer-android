@@ -435,6 +435,11 @@ final class Glass {
         return new float[]{a[0] - b[0], a[1] - b[1]};
     }
 
+    static RectF absRect(View v) {
+        float[] a = abs(v);
+        return new RectF(a[0], a[1], a[0] + v.getWidth(), a[1] + v.getHeight());
+    }
+
     static float[] abs(View v) {
         float x = 0, y = 0;
         View cur = v;

@@ -166,10 +166,10 @@ public class ViewerUiTest {
         assertNotNull(a.dock);
         assertNotNull(a.header);
         assertFalse(a.dock.pill.isEmpty());
-        assertFalse(a.dock.circle.isEmpty());
+        assertTrue("search field only exists while searching", a.dock.circle.isEmpty());
         assertNull(Shadows.shadowOf(a).getNextStartedActivity());
         screenshot(a, "phone-360", 360, 800);
-        tagged(a, "welcome-open").performClick();
+        ((View) tagged(a, "welcome-icon").getParent()).performClick();
         Intent picker = Shadows.shadowOf(a).getNextStartedActivity();
         assertNotNull(picker);
         assertEquals(Intent.ACTION_OPEN_DOCUMENT, picker.getAction());
@@ -207,7 +207,7 @@ public class ViewerUiTest {
         assertTrue(a.dock.dispatchTouchEvent(MotionEvent.obtain(0, 0, MotionEvent.ACTION_DOWN, startX, y, 0)));
         assertTrue(a.dock.dispatchTouchEvent(MotionEvent.obtain(0, 50, MotionEvent.ACTION_MOVE, endX, y, 0)));
         assertTrue(a.dock.dispatchTouchEvent(MotionEvent.obtain(0, 100, MotionEvent.ACTION_UP, endX, y, 0)));
-        assertEquals(3, a.dock.selected);
+        assertEquals(2, a.dock.selected);
         c.pause().stop().destroy();
     }
 
@@ -271,8 +271,8 @@ public class ViewerUiTest {
             MainActivity a = c.get();
             View card = tagged(a, "welcome-card"), actions = tagged(a, "welcome-actions");
             assertTrue(card.getWidth() > 0);
-            assertTrue(card.getWidth() <= 560);
-            for (String tag : new String[]{"welcome-open", "welcome-paste", "welcome-capture"}) {
+            assertTrue(card.getWidth() <= size[0]);
+            for (String tag : new String[]{"welcome-new", "welcome-scan"}) {
                 View v = tagged(a, tag);
                 assertTrue(tag + " width", v.getWidth() > 0);
                 assertTrue(tag + " touch height", v.getHeight() >= 48);
@@ -318,13 +318,127 @@ public class ViewerUiTest {
         awaitFiles(a);
         layout(a, 360, 800);
         assertEquals(file.getAbsolutePath(), field(a, "currentPath"));
-        assertEquals(1, a.dock.selected);
+        assertEquals(1, a.currentTab());
+        assertTrue(a.dock.toolMode());
         assertTrue(((java.util.List<?>) field(a, "dropPermissions")).isEmpty());
         call(a, "closeCurrentFile", new Class<?>[0]);
         layout(a, 360, 800);
         assertEquals("", field(a, "currentPath"));
+        assertEquals(0, a.currentTab());
         assertEquals(0, a.dock.selected);
         c.pause().stop().destroy();
+    }
+
+    /** 9.5 A1A1: document-browser layout (home card, document tool capsules, markup palette, foldable column). */
+    @Test public void previewStyleScreens() throws Exception {
+        ActivityController<MainActivity> c = launch(390, 844);
+        MainActivity a = c.get();
+        File dir = (File) field(a, "sampleDir");
+        SampleSeeder.ensureSeeded(dir);
+        call(a, "buildCompleteNativeUI", new Class<?>[0]);
+        layout(a, 390, 844);
+        Thread.sleep(400);
+        layout(a, 390, 844);
+        assertNotNull(tagged(a, "welcome-card"));
+        assertNotNull(tagged(a, "recent-grid"));
+        assertTrue("phone home has no header buttons", a.header.pill.isEmpty());
+        screenshot(a, "preview-home-phone", 390, 844);
+
+        File pdf = new File(dir, "Viewer_Guide.pdf"), png = new File(dir, "Aurora_Art.png");
+        Bitmap pg = Bitmap.createBitmap(600, 800, Bitmap.Config.ARGB_8888);
+        pg.eraseColor(Color.WHITE);
+        Canvas pc = new Canvas(pg);
+        android.graphics.Paint pp = new android.graphics.Paint();
+        pp.setColor(0xFF2E7D32); pc.drawRect(60, 60, 540, 300, pp);
+        pp.setColor(0xFF333333);
+        for (int i = 0; i < 10; i++) pc.drawRect(60, 340 + i * 40, 540 - (i % 3) * 80, 356 + i * 40, pp);
+        ViewerExports.require(PdfHost.begin("guide", pdf.getAbsolutePath()), "ok");
+        ViewerExports.require(PdfHost.addPageBitmap("guide", 600, 800, pg, 90), "ok");
+        ViewerExports.require(PdfHost.addPageBitmap("guide", 600, 800, pg, 90), "ok");
+        ViewerExports.require(PdfHost.end("guide", "Viewer_Guide.pdf"), "ok");
+        Bitmap art = Bitmap.createBitmap(800, 600, Bitmap.Config.ARGB_8888);
+        Canvas ac = new Canvas(art);
+        ac.drawColor(0xFF5B7FD6);
+        pp.setColor(0xFFF2B84B); ac.drawCircle(560, 220, 120, pp);
+        pp.setColor(0xFF2F4F7F); ac.drawRect(0, 420, 800, 600, pp);
+        try (FileOutputStream out = new FileOutputStream(png)) { art.compress(Bitmap.CompressFormat.PNG, 100, out); }
+        call(a, "buildCompleteNativeUI", new Class<?>[0]);
+        layout(a, 390, 844);
+        Thread.sleep(300);
+        layout(a, 390, 844);
+        screenshot(a, "preview-home-phone", 390, 844);
+        a.openFileAtPath(pdf.getAbsolutePath());
+        awaitFiles(a);
+        layout(a, 390, 844);
+        assertEquals(1, a.currentTab());
+        assertTrue(a.dock.toolMode());
+        assertEquals(6, a.dock.toolCount());
+        RectF g0 = a.dock.toolGroupRect(0), g1 = a.dock.toolGroupRect(1);
+        assertTrue("two capsules: left and right", g0.right < g1.left);
+        Thread.sleep(500);
+        layout(a, 390, 844);
+        screenshot(a, "preview-pdf-phone", 390, 844);
+        assertFalse("PDF sidebar button", a.header.sideRect.isEmpty());
+        a.onToolAction(0, new RectF());   // markup on
+        layout(a, 390, 844);
+        Thread.sleep(500);
+        layout(a, 390, 844);
+        screenshot(a, "preview-pdf-markup-phone", 390, 844);
+        a.onBack();
+        awaitFiles(a);
+        layout(a, 390, 844);
+        assertEquals("back closes the document", "", field(a, "currentPath"));
+        assertEquals(0, a.currentTab());
+
+        a.openFileAtPath(png.getAbsolutePath());
+        awaitFiles(a);
+        layout(a, 390, 844);
+        Thread.sleep(500);
+        layout(a, 390, 844);
+        screenshot(a, "preview-image-phone", 390, 844);
+        a.onHeaderButton(Icons.MARKUP, new RectF());
+        layout(a, 390, 844);
+        Thread.sleep(500);
+        layout(a, 390, 844);
+        assertTrue(a.markupOn());
+        assertEquals(1, a.dock.toolCount());
+        screenshot(a, "preview-image-markup-phone", 390, 844);
+        call(a, "closeCurrentFile", new Class<?>[0]);
+        a.switchTab(4);
+        layout(a, 390, 844);
+        Thread.sleep(300);
+        layout(a, 390, 844);
+        screenshot(a, "preview-shared-phone", 390, 844);
+        c.pause().stop().destroy();
+
+        // foldable unfolded
+        ActivityController<MainActivity> f = launch(1000, 800);
+        MainActivity b = f.get();
+        call(b, "buildCompleteNativeUI", new Class<?>[0]);
+        layout(b, 1000, 800);
+        Thread.sleep(400);
+        layout(b, 1000, 800);
+        assertTrue(b.dock.rail);
+        screenshot(b, "preview-home-fold", 1000, 800);
+        float px = b.dock.pill.centerX(), py = b.dock.pill.top + b.dock.pill.height() * 0.3f;
+        assertTrue(b.dock.dispatchTouchEvent(MotionEvent.obtain(0, 0, MotionEvent.ACTION_DOWN, px, py, 0)));
+        for (int i = 0; i < 30; i++) { Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(16)); }
+        layout(b, 1000, 800);
+        screenshot(b, "preview-fold-tab-labels", 1000, 800);
+        b.dock.dispatchTouchEvent(MotionEvent.obtain(0, 600, MotionEvent.ACTION_CANCEL, px, py, 0));
+        b.openFileAtPath(pdf.getAbsolutePath());
+        awaitFiles(b);
+        layout(b, 1000, 800);
+        Thread.sleep(500);
+        layout(b, 1000, 800);
+        assertEquals(3, b.dock.toolCount());
+        screenshot(b, "preview-pdf-fold", 1000, 800);
+        b.onToolAction(0, new RectF());
+        layout(b, 1000, 800);
+        Thread.sleep(400);
+        layout(b, 1000, 800);
+        screenshot(b, "preview-pdf-markup-fold", 1000, 800);
+        f.pause().stop().destroy();
     }
 
     @Test public void cancellingChangedDocumentReleasesPendingDrop() throws Exception {
@@ -400,7 +514,7 @@ public class ViewerUiTest {
         File copied = ViewerExports.snapshot(a, file.getAbsolutePath(), "image", stage, null, 92, 150, false);
         assertArrayEquals(java.nio.file.Files.readAllBytes(file.toPath()), java.nio.file.Files.readAllBytes(copied.toPath()));
 
-        assertFalse("Contextual glass viewer bar is visible", a.dock.mini.isEmpty());
+        assertTrue("Document tool capsules are up", a.dock.toolMode());
         screenshot(a, "phone-image", 360, 800);
 
         call(a, "rotateCurrentImage", new Class<?>[]{int.class}, 90);
@@ -440,7 +554,7 @@ public class ViewerUiTest {
         a.getResources().updateConfiguration(config, a.getResources().getDisplayMetrics());
         call(a, "buildCompleteNativeUI", new Class<?>[0]);
         layout(a, 360, 800);
-        View button = tagged(a, "welcome-open");
+        View button = tagged(a, "welcome-new");
         Rect visible = new Rect();
         assertTrue(button.getGlobalVisibleRect(visible));
         assertEquals(button.getHeight(), visible.height());
@@ -503,7 +617,7 @@ public class ViewerUiTest {
         assertEquals(3f, a.getResources().getDisplayMetrics().density, .01f);
         View card = tagged(a, "welcome-card");
         assertTrue(card.getWidth() <= 1080);
-        assertTrue(tagged(a, "welcome-open").getHeight() >= 144);
+        assertTrue(tagged(a, "welcome-new").getHeight() >= 144);
         screenshot(a, "phone-1080x2400", 1080, 2400);
         c.pause().stop().destroy();
     }
@@ -578,7 +692,7 @@ public class ViewerUiTest {
     @Test public void captureDenialNeverStartsProjectionService() throws Exception {
         ActivityController<MainActivity> c = launch(360, 800);
         MainActivity a = c.get();
-        tagged(a, "welcome-capture").performClick();
+        a.launchScreenCapture();
         assertNotNull(Shadows.shadowOf(a).getNextStartedActivity());
         assertNull(Shadows.shadowOf(a).getNextStartedService());
         call(a, "onActivityResult", new Class<?>[]{int.class, int.class, Intent.class}, 1006, Activity.RESULT_CANCELED, null);
@@ -664,7 +778,13 @@ public class ViewerUiTest {
         xxeZip.delete();
 
         // 3. Updater URL allowlist
-        assertEquals("9.5.11", Updater.VERSION);
+        assertEquals("9.5 A1A1", Updater.VERSION);
+        assertTrue(Updater.newer("9.5 A1A1", "9.5.11"));
+        assertTrue(Updater.newer("v9.5-A1A2", Updater.VERSION));
+        assertFalse(Updater.newer("9.5.12", Updater.VERSION));
+        assertEquals("9.5 A1A1", Updater.nextVersion("9.5.11"));
+        assertEquals("9.5 A1B1", Updater.nextVersion("9.5 A1A9"));
+        assertEquals("9.5 A1A1", Updater.displayVersion("v9.5-A1A1"));
         assertTrue(Updater.isTrustedReleaseUrl("https://github.com/Bundelldebug/viewer-android/releases/download/v9.5.11/SamsungViewer_Android.apk"));
         assertTrue(Updater.isTrustedReleaseUrl("https://objects.githubusercontent.com/release/SamsungViewer_Android.apk"));
         assertFalse(Updater.isTrustedReleaseUrl("http://github.com/Bundelldebug/viewer-android/releases/download/v9.5.11/SamsungViewer_Android.apk"));

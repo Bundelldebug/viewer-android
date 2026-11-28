@@ -30,6 +30,24 @@ final class Header extends View {
     private Listener listener;
     private final Glass.Surface pillGlass = new Glass.Surface();
     private final Glass.Surface backGlass = new Glass.Surface();
+    private final Glass.Surface sideGlass = new Glass.Surface();
+
+    // ---- document screen (9.5 A1A1) ----
+    /** A document is open: title always shown with a menu chevron; on a foldable the back button tops the right column. */
+    private boolean docMode;
+    /** Glass sidebar button at the far left (PDF pages). */
+    private boolean sideBtn;
+    /** Icon drawn on an accent disc (the markup button while markup is on), or -1. */
+    private int activeIcon = -1;
+    final RectF sideRect = new RectF(), titleRect = new RectF();
+
+    void configureDoc(boolean doc, boolean side, int active) {
+        if (doc == docMode && side == sideBtn && active == activeIcon) return;
+        docMode = doc;
+        sideBtn = side;
+        activeIcon = active;
+        invalidate();
+    }
     private final Object blurNodeObj; // RenderNode on API 29+
     private final Paint mask = new Paint();
     private final Paint wash = new Paint();
@@ -74,6 +92,15 @@ final class Header extends View {
         backGlass.rim = 0.32f;
         backGlass.edgeDark = 0.32f;
         backGlass.shadowAlpha = 0.07f;
+        sideGlass.blurDp = Ui.barBlur();
+        sideGlass.refractDp = 15;
+        sideGlass.edgeDp = 20;
+        sideGlass.outerDp = 5;
+        sideGlass.outerRefractDp = 11;
+        sideGlass.vibrance = 1.35f;
+        sideGlass.rim = 0.32f;
+        sideGlass.edgeDark = 0.32f;
+        sideGlass.shadowAlpha = 0.07f;
 
         press.onUpdate = this::invalidate;
         morph.onUpdate = this::invalidate;
@@ -166,19 +193,38 @@ final class Header extends View {
         boolean rail = Dock.railFor(rw, rh);
         vertical = rail && icons.length > 1;
         float h = Ui.dpf(rail ? 60 : 46);
-        float len = icons.length <= 1 ? h : Ui.dpf(rail ? 112 : 100);
+        int n = icons.length;
+        float len = n <= 1 ? h : n * Ui.dpf(rail ? 50 : 44) + Ui.dpf(12);
         float right = getWidth() - Ui.dpf(rail ? 20 : 16);
-        if (vertical) pill.set(right - h, top, right, top + len);
+        float pillTop = top;
+        boolean railDoc = rail && docMode && back;
+        float left = Ui.dpf(16);
+        sideRect.setEmpty();
+        if (sideBtn) {
+            sideRect.set(left, top + Ui.dpf(1), left + Ui.dpf(44), top + Ui.dpf(45));
+            left = sideRect.right + Ui.dpf(8);
+        }
+        if (railDoc) {
+            // the back button tops the right-hand column; the document's actions hang below it
+            backRect.set(right - h, top, right, top + h);
+            pillTop = top + h + Ui.dpf(10);
+            vertical = n > 1;
+        } else {
+            backRect.set(left, top + Ui.dpf(1), left + Ui.dpf(44), top + Ui.dpf(45));
+        }
+        if (vertical) pill.set(right - h, pillTop, right, pillTop + len);
+        else if (railDoc) pill.set(right - h, pillTop, right, pillTop + h);
         else pill.set(right - len, top, right, top + h);
-        if (icons.length == 0) pill.setEmpty();
-        backRect.set(Ui.dpf(16), top + Ui.dpf(1), Ui.dpf(16) + Ui.dpf(44), top + Ui.dpf(45));
+        if (n == 0) pill.setEmpty();
     }
 
     @Override protected void onDraw(Canvas c) {
         layoutRects();
         if (pendingFrom != null) startPendingMorph();
-        int w = getWidth(), h = getHeight();
-        if (w <= 0 || h <= 0) return;
+        int w = getWidth(), h0 = getHeight();
+        if (w <= 0 || h0 <= 0) return;
+        // the blur strip keeps its usual height even when the view is taller (foldable button column)
+        int h = Math.min(h0, Ui.statusInset + Ui.dp(88));
 
         // Progressive RenderEffect blur strip under status bar
         if (blurAlpha > 0.01f && Build.VERSION.SDK_INT >= 31 && c.isHardwareAccelerated() && backdrop.recorded && backdrop.nodeObj != null && blurNodeObj != null && Ui.glass) {
@@ -218,7 +264,26 @@ final class Header extends View {
 
         // Back button: glass circle with press expansion in A style; clean chevron in G style
         float bp = backP.value;
-        float titleX = Ui.lerp(Ui.dpf(Ui.gStyle ? 22 : 16), backRect.right + Ui.dpf(Ui.gStyle ? 6 : 12), Ui.clamp(bp, 0f, 1f));
+        boolean railDoc = backRect.left > getWidth() / 2f;
+        float titleBase = sideBtn ? sideRect.right + Ui.dpf(12) : Ui.dpf(Ui.gStyle ? 22 : 16);
+        float titleX = railDoc ? titleBase : Ui.lerp(titleBase, backRect.right + Ui.dpf(Ui.gStyle ? 6 : 12), Ui.clamp(bp, 0f, 1f));
+        if (!sideRect.isEmpty()) {
+            float sp = pressed == 98 ? 1f + 0.12f * press.value : 1f;
+            RectF sr = sideTmp;
+            sr.set(sideRect.centerX() - sideRect.width() / 2f * sp, sideRect.centerY() - sideRect.height() / 2f * sp,
+                    sideRect.centerX() + sideRect.width() / 2f * sp, sideRect.centerY() + sideRect.height() / 2f * sp);
+            if (!Ui.gStyle) {
+                sideGlass.shapes(sr, sr.height() / 2f, null, 0, null, 0);
+                sideGlass.alpha = contentAlpha;
+                sideGlass.tint = Ui.barTint();
+                sideGlass.blurDp = Ui.barBlur();
+                sideGlass.pressX = sr.centerX(); sideGlass.pressY = sr.centerY();
+                sideGlass.pressR = Ui.dpf(36);
+                sideGlass.pressAmt = pressed == 98 ? press.value : 0f;
+                sideGlass.draw(c, this, backdrop);
+            }
+            Icons.draw(c, Icons.SIDEBAR, sr.centerX(), sr.centerY(), Ui.dpf(21) * sp, Ui.alpha(fg, contentAlpha));
+        }
         if (bp > 0.01f) {
             float pressGrow = pressed == 99 ? 1f + 0.12f * press.value : 1f;
             float s = Ui.lerp(0.35f, 1f, bp) * pressGrow;
@@ -239,26 +304,39 @@ final class Header extends View {
             Icons.draw(c, Icons.BACK, br.centerX() - Ui.dpf(1), br.centerY(), Ui.dpf(Ui.gStyle ? 24 : 22) * s, Ui.alpha(fg, ba));
         }
 
-        // Collapsing header title (zero overlap with tablet top tab pill)
-        if (titleAlpha > 0.01f && title.length() > 0) {
-            titlePaint.setColor(Ui.alpha(fg, titleAlpha * contentAlpha));
+        // Collapsing header title (zero overlap with tablet top tab pill); a document's title always shows, with a menu chevron
+        titleRect.setEmpty();
+        float tA = docMode ? 1f : titleAlpha;
+        if (tA > 0.01f && title.length() > 0) {
+            titlePaint.setColor(Ui.alpha(fg, tA * contentAlpha));
             int rw = getRootView() != null && getRootView().getWidth() > 0 ? getRootView().getWidth() : Ui.screenW;
             int rh = getRootView() != null && getRootView().getHeight() > 0 ? getRootView().getHeight() : Ui.screenH;
             boolean onTablet = Dock.tabletFor(rw, rh);
-            float rightBound = pill.isEmpty() ? w - Ui.dpf(16) : pill.left - Ui.dpf(12);
+            float rightBound = pill.isEmpty() || vertical || railDoc ? w - Ui.dpf(vertical || railDoc ? 96 : 16) : pill.left - Ui.dpf(12);
+            if (docMode) rightBound -= Ui.dpf(30);   // room for the chevron button
             if (onTablet) {
                 float maxTabLeft = (w - Math.min(rw * 0.42f, Ui.dpf(440)) - Ui.dpf(92)) / 2f - Ui.dpf(12);
                 rightBound = Math.min(rightBound, maxTabLeft);
             }
             float avail = rightBound - titleX;
             if (avail >= Ui.dpf(44)) {
-                float rowCy = vertical ? pill.top + Ui.dpf(23) : (pill.isEmpty() ? backRect.centerY() : pill.centerY());
-                float ts = Ui.gStyle ? (onTablet ? 18f : 20f) : 17f;
+                float rowCy = vertical || railDoc ? Ui.statusInset + Ui.dpf(14 + 23) : (pill.isEmpty() ? backRect.centerY() : pill.centerY());
+                if (docMode && !railDoc) rowCy = backRect.centerY();
+                float ts = docMode ? 15.5f : (Ui.gStyle ? (onTablet ? 18f : 20f) : 17f);
                 titlePaint.setTextSize(Ui.sp(ts));
+                titlePaint.setTypeface(docMode ? Ui.semibold : Ui.bold);
                 while (ts > 13f && titlePaint.measureText(title) > avail) { ts -= 1f; titlePaint.setTextSize(Ui.sp(ts)); }
                 CharSequence t = TextUtils.ellipsize(title, titlePaint, avail, TextUtils.TruncateAt.END);
                 float baseline = rowCy + titlePaint.getTextSize() * 0.36f;
-                c.drawText(t, 0, t.length(), titleX, baseline - Ui.dpf(3) * (1f - titleAlpha), titlePaint);
+                c.drawText(t, 0, t.length(), titleX, baseline - Ui.dpf(3) * (1f - tA), titlePaint);
+                if (docMode) {
+                    float tw = titlePaint.measureText(t, 0, t.length());
+                    float cx = titleX + tw + Ui.dpf(14), cr = Ui.dpf(9);
+                    fill.setColor(Ui.alpha(Ui.dark ? 0x33FFFFFF : 0x14000000, contentAlpha * (pressed == 97 ? 1f : 0.7f)));
+                    c.drawCircle(cx, rowCy, cr, fill);
+                    Icons.draw(c, Icons.CHEVRON_DOWN, cx, rowCy + Ui.dpf(0.5f), Ui.dpf(12), Ui.alpha(Ui.text2(), contentAlpha));
+                    titleRect.set(titleX - Ui.dpf(6), rowCy - Ui.dpf(20), cx + cr + Ui.dpf(6), rowCy + Ui.dpf(20));
+                }
             }
         }
 
@@ -288,7 +366,7 @@ final class Header extends View {
         }
     }
 
-    private final RectF tmpRect = new RectF(), pointRect = new RectF();
+    private final RectF tmpRect = new RectF(), pointRect = new RectF(), sideTmp = new RectF();
 
     private RectF pointAt(RectF r) {
         pointRect.set(r.centerX(), r.centerY(), r.centerX(), r.centerY());
@@ -318,6 +396,13 @@ final class Header extends View {
             float cy = vert ? box.top + box.height() * along + nudge : box.centerY();
             boolean isP = pressed == i && press.value > 0.01f;
             float pop = isP ? 1f + 0.16f * press.value : 1f;
+            if (set[i] == activeIcon && set == icons) {
+                fill.setColor(Ui.alpha(Ui.ACCENT, contentAlpha * a));
+                float rr = (vert ? box.width() : Math.min(box.height(), box.width() / Math.max(1, n))) / 2f - Ui.dpf(5);
+                c.drawCircle(cx, cy, rr + Ui.dpf(2) * (isP ? press.value : 0f), fill);
+                Icons.draw(c, set[i], cx, cy, Ui.dpf(23) * s * pop, Ui.alpha(0xFFFFFFFF, contentAlpha * a));
+                continue;
+            }
             if (isP) {
                 fill.setColor(Ui.alpha(Ui.pressed(), press.value));
                 float r = Math.min(box.width(), box.height()) / 2f - Ui.dpf(2) + Ui.dpf(2) * press.value;
@@ -328,8 +413,11 @@ final class Header extends View {
     }
 
     private int hit(float x, float y) {
-        if (back && x <= backRect.right + Ui.dpf(8) && y <= backRect.bottom + Ui.dpf(8) && y >= backRect.top - Ui.dpf(8)) return 99;
-        if (!pill.isEmpty() && x >= pill.left - Ui.dpf(6) && y >= pill.top - Ui.dpf(6) && y <= pill.bottom + Ui.dpf(6)) {
+        float sl = Ui.dpf(8);
+        if (!sideRect.isEmpty() && x >= sideRect.left - sl && x <= sideRect.right + Ui.dpf(4) && y >= sideRect.top - sl && y <= sideRect.bottom + sl) return 98;
+        if (back && x >= backRect.left - sl && x <= backRect.right + sl && y <= backRect.bottom + sl && y >= backRect.top - sl) return 99;
+        if (!titleRect.isEmpty() && titleRect.contains(x, y)) return 97;
+        if (!pill.isEmpty() && x >= pill.left - Ui.dpf(6) && x <= pill.right + Ui.dpf(6) && y >= pill.top - Ui.dpf(6) && y <= pill.bottom + Ui.dpf(6)) {
             int n = icons.length;
             if (n == 0) return -1;
             int i = vertical ? (int) ((y - pill.top) / (pill.height() / n)) : (int) ((x - pill.left) / (pill.width() / n));
@@ -353,7 +441,12 @@ final class Header extends View {
                 press.to(0f);
                 if (p >= 0 && hit(e.getX(), e.getY()) == p && listener != null) {
                     if (p == 99) listener.onBack();
-                    else {
+                    else if (p == 98 || p == 97) {
+                        float[] o = Glass.abs(this);
+                        RectF a = new RectF(p == 98 ? sideRect : titleRect);
+                        a.offset(o[0], o[1]);
+                        listener.onHeaderButton(p == 98 ? Icons.SIDEBAR : Icons.CHEVRON_DOWN, a);
+                    } else {
                         float[] o = Glass.abs(this);
                         RectF a = new RectF(pill);
                         a.offset(o[0], o[1]);

@@ -22,7 +22,8 @@ final class Icons {
             CROP = 36, PEN = 37, HIGHLIGHT = 38, SHAPES = 39, TEXT_ADD = 40,
             SIGN = 41, ALPHA = 42, ADJUST = 43, RESIZE = 44, OCR = 45,
             PAGES = 46, APPEARANCE = 47, DOWNLOAD = 48, TRASH = 49, EDIT = 50,
-            COPY = 51, PLAY = 52, PREV = 53, NEXT = 54, DOC = 55, MEDIA = 56, PDF = 57, SORT = 58;
+            COPY = 51, PLAY = 52, PREV = 53, NEXT = 54, DOC = 55, MEDIA = 56, PDF = 57, SORT = 58,
+            SHARED = 59, MARKUP = 60, FORM = 61, SELECT = 62, ERASER = 63, CHEVRON_DOWN = 64, GRID = 65, RECENT = 66;
 
     private static final Paint P = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final CornerPathEffect ROUND2 = new CornerPathEffect(2.0f);
@@ -467,6 +468,88 @@ final class Icons {
                 c.drawLine(4.5f, 7f, 19.5f, 7f, P);
                 c.drawLine(7f, 12f, 17f, 12f, P);
                 c.drawLine(9.5f, 17f, 14.5f, 17f, P);
+                break;
+            }
+            case RECENT: {
+                // filled clock (최근 항목): the hands are cut out of the disc
+                Path hands = new Path();
+                hands.moveTo(12f, 6.6f); hands.lineTo(12f, 12.4f); hands.lineTo(15.8f, 14.6f);
+                Paint sp = new Paint(Paint.ANTI_ALIAS_FLAG);
+                sp.setStyle(Paint.Style.STROKE); sp.setStrokeWidth(2.1f);
+                sp.setStrokeCap(Paint.Cap.ROUND); sp.setStrokeJoin(Paint.Join.ROUND);
+                Path cut = new Path();
+                sp.getFillPath(hands, cut);
+                p.addCircle(12f, 12f, 10f, Path.Direction.CW);
+                p.op(cut, Path.Op.DIFFERENCE);
+                fill();
+                c.drawPath(p, P);
+                break;
+            }
+            case SHARED: {
+                // two people (공유됨)
+                fill();
+                c.drawCircle(9f, 8f, 3.6f, P);
+                R.set(2f, 13.2f, 16f, 22f);
+                c.drawRoundRect(R, 6f, 6f, P);
+                c.drawCircle(16.6f, 7.4f, 3f, P);
+                p.moveTo(17.2f, 12.4f); p.cubicTo(20.6f, 12.4f, 22.4f, 14.6f, 22.4f, 17.2f); p.lineTo(22.4f, 19.6f); p.lineTo(17.6f, 19.6f);
+                p.cubicTo(17.6f, 16.6f, 16.8f, 14.2f, 15.2f, 12.8f); p.cubicTo(15.8f, 12.5f, 16.5f, 12.4f, 17.2f, 12.4f); p.close();
+                c.drawPath(p, P);
+                break;
+            }
+            case MARKUP: {
+                // pen nib inside a circle
+                stroke(1.8f);
+                c.drawCircle(12f, 12f, 9.4f, P);
+                P.setPathEffect(ROUND1);
+                p.moveTo(12f, 5.4f); p.lineTo(15.6f, 13.6f); p.lineTo(15.6f, 18.6f); p.lineTo(8.4f, 18.6f); p.lineTo(8.4f, 13.6f); p.close();
+                c.drawPath(p, P);
+                P.setPathEffect(null);
+                c.drawLine(12f, 10.6f, 12f, 13.6f, P);
+                break;
+            }
+            case FORM: {
+                // form field with a pen
+                stroke(1.8f);
+                R.set(2.6f, 7.2f, 17.4f, 16.8f);
+                c.drawRoundRect(R, 2.6f, 2.6f, P);
+                c.drawLine(5.6f, 12f, 9.6f, 12f, P);
+                P.setPathEffect(ROUND1);
+                p.moveTo(20.4f, 4.2f); p.lineTo(21.8f, 5.6f); p.lineTo(14.6f, 12.8f); p.lineTo(12.6f, 13.4f); p.lineTo(13.2f, 11.4f); p.close();
+                c.drawPath(p, P);
+                break;
+            }
+            case SELECT: {
+                // dashed selection rectangle
+                stroke(1.8f);
+                P.setPathEffect(new android.graphics.DashPathEffect(new float[]{3f, 2.4f}, 0f));
+                R.set(3.4f, 4.6f, 20.6f, 19.4f);
+                c.drawRoundRect(R, 2.8f, 2.8f, P);
+                P.setPathEffect(null);
+                break;
+            }
+            case ERASER: {
+                stroke(1.8f);
+                P.setPathEffect(ROUND1);
+                p.moveTo(14.2f, 3.8f); p.lineTo(20.2f, 9.8f); p.lineTo(10.6f, 19.4f); p.lineTo(6.6f, 19.4f); p.lineTo(3.8f, 16.6f); p.close();
+                c.drawPath(p, P);
+                P.setPathEffect(null);
+                c.drawLine(8.6f, 9.4f, 14.6f, 15.4f, P);
+                c.drawLine(10.6f, 20f, 20.4f, 20f, P);
+                break;
+            }
+            case CHEVRON_DOWN: {
+                stroke(2.2f);
+                p.moveTo(6.2f, 9.2f); p.lineTo(12f, 15f); p.lineTo(17.8f, 9.2f);
+                c.drawPath(p, P);
+                break;
+            }
+            case GRID: {
+                stroke(1.9f);
+                R.set(3.6f, 3.6f, 10.6f, 10.6f); c.drawRoundRect(R, 2.2f, 2.2f, P);
+                R.set(13.4f, 3.6f, 20.4f, 10.6f); c.drawRoundRect(R, 2.2f, 2.2f, P);
+                R.set(3.6f, 13.4f, 10.6f, 20.4f); c.drawRoundRect(R, 2.2f, 2.2f, P);
+                R.set(13.4f, 13.4f, 20.4f, 20.4f); c.drawRoundRect(R, 2.2f, 2.2f, P);
                 break;
             }
             default:

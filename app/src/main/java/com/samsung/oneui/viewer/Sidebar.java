@@ -77,11 +77,10 @@ final class Sidebar extends FrameLayout {
         slp.bottomMargin = Ui.dp(14);
         col.addView(search, slp);
 
-        // 4 tabs
-        String[] titles = {"홈", "보기", "목록", "설정"};
-        for (int i = 0; i < 4; i++) {
-            final int idx = i;
-            LinearLayout r = row(Dock.TAB_ICONS[i], titles[i], v -> m.sidebarTab(idx));
+        // tabs (최근 항목 · 공유됨 · 둘러보기) and settings
+        for (int i = 0; i < PAGES.length; i++) {
+            final int idx = PAGES[i];
+            LinearLayout r = row(ICONS[i], TITLES[i], v -> m.sidebarTab(idx));
             tabRows.add(r);
             col.addView(r, rowLp());
         }
@@ -146,10 +145,14 @@ final class Sidebar extends FrameLayout {
         return r;
     }
 
+    private static final int[] PAGES = {0, 4, 2, 3};
+    private static final int[] ICONS = {Icons.RECENT, Icons.SHARED, Icons.FOLDER, Icons.SETTINGS};
+    private static final String[] TITLES = {"최근 항목", "공유됨", "둘러보기", "설정"};
+
     void setSelected(int tab) {
         for (int i = 0; i < tabRows.size(); i++) {
             LinearLayout r = tabRows.get(i);
-            boolean on = i == tab;
+            boolean on = i < PAGES.length && PAGES[i] == tab;
             int selCol = Ui.gStyle ? Ui.alpha(Ui.ACCENT, Ui.dark ? 0.22f : 0.13f) : (Ui.dark ? 0x33FFFFFF : 0x17000000);
             Drawable base = on ? Ui.round(selCol, 100) : null;
             r.setBackground(new RippleDrawable(ColorStateList.valueOf(Ui.pressed()), base, Ui.round(0xFFFFFFFF, 100)));

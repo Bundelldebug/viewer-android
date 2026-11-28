@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
 final class Updater {
     private Updater() {}
 
-    static final String VERSION = "9.5.11";
+    static final String VERSION = "9.5 A1A1";
     static final String REPO = "Bundelldebug/viewer-android";
     static final String PREF_AUTO = "update_auto";
     private static final long DAY = 24L * 60 * 60 * 1000;
@@ -85,10 +85,10 @@ final class Updater {
                 int code = c.getResponseCode();
                 if (code != 200) throw new Exception("HTTP " + code);
                 JSONObject o = new JSONObject(read(c.getInputStream()));
-                String tag = o.optString("tag_name").replaceFirst("^[vV]", "");
+                String tag = o.optString("tag_name").trim();
                 if (newer(tag, VERSION)) {
                     r = new Release();
-                    r.version = tag;
+                    r.version = displayVersion(tag);   // "9.5 A1A1" even when the tag is "v9.5-A1A1"
                     r.notes = o.optString("body");
                     r.pageUrl = o.optString("html_url");
                     JSONArray as = o.optJSONArray("assets");
@@ -197,17 +197,67 @@ final class Updater {
         return out;
     }
 
-    static boolean newer(String a, String b) {
-        String[] x = a.split("[.\\-+]"), y = b.split("[.\\-+]");
-        for (int i = 0; i < Math.max(x.length, y.length); i++) {
-            int p = i < x.length ? num(x[i]) : 0, q = i < y.length ? num(y[i]) : 0;
-            if (p != q) return p > q;
-        }
-        return false;
+    /*
+     * Version names. Up to 9.5.11 (viewer): "9.5.N". From the release after 9.5.11: "9.5 A1A1", a 4-character code
+     * (letter, digit 1-9, letter, digit 1-9) counted from the right:
+     *   A1A1 → A1A2 … A1A9 → A1B1 … A1Z9 → A2A1 … A9Z9 → B1A1 …   (what follows Z9Z9 is not decided yet)
+     * Every code version is newer than every "9.5.N". Git tags can't hold spaces, so tags may be written
+     * "v9.5-A1A1", "9.5_A1A1", "9.5.A1A1" or "9.5A1A1"; all mean "9.5 A1A1".
+     */
+    private static final Pattern CODE_VER = Pattern.compile("^[vV]?(\\d+)\\.(\\d+)[\\s._\\-]*([A-Za-z])([1-9])([A-Za-z])([1-9])$");
+    private static final Pattern NUM_VER = Pattern.compile("^[vV]?(\\d+)\\.(\\d+)(?:\\.(\\d+))?.*$");
+
+    /** {major, minor, kind (0 = 9.5.N, 1 = code), value}; null if unreadable. */
+    static long[] parseVersion(String v) {
+        if (v == null) return null;
+        String s = v.trim();
+        Matcher m = CODE_VER.matcher(s);
+        if (m.matches()) return new long[]{Long.parseLong(m.group(1)), Long.parseLong(m.group(2)), 1,
+                codeOrdinal(m.group(3).charAt(0), m.group(4).charAt(0), m.group(5).charAt(0), m.group(6).charAt(0))};
+        m = NUM_VER.matcher(s);
+        if (m.matches()) return new long[]{Long.parseLong(m.group(1)), Long.parseLong(m.group(2)), 0,
+                m.group(3) == null ? 0 : Long.parseLong(m.group(3))};
+        return null;
     }
 
-    private static int num(String s) {
-        try { return Integer.parseInt(s.replaceAll("\\D", "")); } catch (Exception e) { return 0; }
+    /** A1A1 = 0, A1A2 = 1 … A1A9 = 8, A1B1 = 9 … A1Z9 = 233, A2A1 = 234 … A9Z9 = 2105, B1A1 = 2106. */
+    static long codeOrdinal(char l1, char d1, char l2, char d2) {
+        int a = Character.toUpperCase(l1) - 'A', b = d1 - '1', c = Character.toUpperCase(l2) - 'A', d = d2 - '1';
+        return (((long) a * 9 + b) * 26 + c) * 9 + d;
+    }
+
+    /** The version after {@code v}: 9.5.11 → 9.5 A1A1, A1A9 → A1B1, A1Z9 → A2A1, A9Z9 → B1A1; null after Z9Z9. */
+    static String nextVersion(String v) {
+        long[] p = parseVersion(v);
+        if (p == null) return null;
+        if (p[2] == 0) return p[0] + "." + p[1] + " A1A1";
+        long n = p[3] + 1;
+        if (n >= 26L * 9 * 26 * 9) return null;   // after Z9Z9: not decided yet
+        return p[0] + "." + p[1] + " " + codeOf(n);
+    }
+
+    static String codeOf(long n) {
+        int d = (int) (n % 9); n /= 9;
+        int c = (int) (n % 26); n /= 26;
+        int b = (int) (n % 9); n /= 9;
+        int a = (int) n;
+        return "" + (char) ('A' + a) + (char) ('1' + b) + (char) ('A' + c) + (char) ('1' + d);
+    }
+
+    /** "9.5 A1A1", whatever separator the tag used; other names unchanged. */
+    static String displayVersion(String v) {
+        if (v == null) return "";
+        Matcher m = CODE_VER.matcher(v.trim());
+        return m.matches() ? m.group(1) + "." + m.group(2) + " " + (m.group(3) + m.group(4) + m.group(5) + m.group(6)).toUpperCase(java.util.Locale.ROOT)
+                : v.trim().replaceFirst("^[vV]", "");
+    }
+
+    /** a is newer than b: "9.5.31" > "9.5.30", "9.5 A1A1" > "9.5.31", "9.5 A1B1" > "9.5 A1A9". */
+    static boolean newer(String a, String b) {
+        long[] x = parseVersion(a), y = parseVersion(b);
+        if (x == null || y == null) return false;
+        for (int i = 0; i < 4; i++) if (x[i] != y[i]) return x[i] > y[i];
+        return false;
     }
 
     /** Formats GitHub release Markdown into clean styled Android text without raw #, **, `, or [label](url). */

@@ -62,156 +62,394 @@ final class Pages {
     }
 
     // =========================================================================
-    // 1. HOME PAGE (Preserved App Icon Hero + Quick Actions + Recent Files)
+    // 1. 최근 항목 (home): big title + app icon, two glass buttons, a "최근 항목" card with a file grid.
+    //    Foldable unfolded: title / buttons on the left, the card as a tall sheet on the right.
     // =========================================================================
     static final class HomePage extends Page {
-        private LinearLayout heroWrap;
-
         HomePage(MainActivity m) {
-            super(m, "뷰어", true);
-            headerIcons = new int[]{Icons.OPEN_FILE, Icons.MORE};
+            super(m, "뷰어", false);
+            headerIcons = new int[0];
             setGrouped(true);
         }
 
+        void toggleLayout() {
+            SharedPreferences p = MainActivity.prefs(getContext());
+            p.edit().putBoolean("home_list", !p.getBoolean("home_list", false)).apply();
+            rebuild();
+        }
+
+        @Override float titleProgress() { return Ui.clamp((scroll.getScrollY() - Ui.dp(36)) / (float) Ui.dp(22), 0f, 1f); }
+
         @Override void build() {
             Context c = getContext();
-            boolean wide = main.tabletUi() || Ui.wideInner();
-
-            // Hero card wrapper (avoids fold hinge automatically when foldBounds is set!)
-            heroWrap = new LinearLayout(c);
-            heroWrap.setOrientation(LinearLayout.VERTICAL);
-            heroWrap.setGravity(Gravity.CENTER_HORIZONTAL);
-            heroWrap.setPadding(Ui.dp(16), Ui.dp(6), Ui.dp(16), Ui.dp(8));
-            applyFoldAvoidance(heroWrap);
-
-            LinearLayout card = new LinearLayout(c);
+            boolean railUi = main.sideInset() > 0;
+            boolean tablet = main.tabletUi();
+            boolean list = MainActivity.prefs(c).getBoolean("home_list", false);
+            LinearLayout hero = buildHero(c, railUi);
+            List<File> recents = main.collectRecentFiles();
+            int cols = railUi ? 3 : (tablet ? 5 : 3);
+            LinearLayout card = recentCard(main, "최근 항목", recents, cols, list, railUi ? new int[]{Icons.SEARCH} : new int[]{list ? Icons.GRID : Icons.GRID, Icons.MORE, Icons.SEARCH});
             card.setTag("welcome-card");
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setGravity(Gravity.CENTER_HORIZONTAL);
-            card.setPadding(Ui.dp(20), Ui.dp(22), Ui.dp(20), Ui.dp(20));
-            GradientDrawable cardBg = Ui.round(Ui.card(), Ui.cardRadius());
-            cardBg.setStroke(Math.max(1, Ui.dp(0.75f)), Ui.dark ? 0x1EFFFFFF : 0x10000000);
-            card.setBackground(cardBg);
-            card.setElevation(Ui.dpf(Ui.dark ? 2f : 4f));
+            if (railUi) {
+                LinearLayout split = new LinearLayout(c);
+                split.setOrientation(LinearLayout.HORIZONTAL);
+                int availW = Math.max(Ui.dp(300), Ui.screenW - main.sideInset() - main.contentInsetPx());
+                int availH = Math.max(Ui.dp(240), Ui.screenH - Ui.statusInset - Ui.dp(64) - Ui.navInset - Ui.dp(24));
+                Rect fb = main.foldBounds;
+                int leftW, gapW;
+                if (fb != null && fb.height() > fb.width() && fb.left > Ui.dp(160) && fb.right < availW - Ui.dp(160)) {
+                    // book-style hinge: buttons on the left half, the card starts right of the hinge
+                    leftW = fb.left - Ui.dp(12);
+                    gapW = fb.right + Ui.dp(12) - leftW;
+                } else {
+                    leftW = (int) (availW * 0.46f);
+                    gapW = Ui.dp(4);
+                }
+                LinearLayout left = new LinearLayout(c);
+                left.setOrientation(LinearLayout.VERTICAL);
+                left.setGravity(Gravity.CENTER_VERTICAL);
+                left.addView(hero, Widgets.MW);
+                split.addView(left, new LinearLayout.LayoutParams(leftW, availH));
+                card.setMinimumHeight(availH);
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                clp.leftMargin = gapW;
+                split.addView(card, clp);
+                content.addView(split, Widgets.MW);
+            } else {
+                content.addView(hero, Widgets.MW);
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                int side = tablet ? Math.max(Ui.dp(20), (Ui.screenW - main.contentInsetPx() - Ui.dp(860)) / 2) : Ui.dp(14);
+                clp.setMargins(side, Ui.dp(22), side, 0);
+                card.setMinimumHeight(Math.max(Ui.dp(260), Ui.screenH / 2 - Ui.dp(40)));
+                content.addView(card, clp);
+            }
+        }
 
-            // Preserved Viewer App Icon (NEVER redrawn — loaded directly from assets/icon.png)
+        private LinearLayout buildHero(Context c, boolean railUi) {
+            LinearLayout hero = new LinearLayout(c);
+            hero.setTag("welcome-hero");
+            hero.setOrientation(LinearLayout.VERTICAL);
+            int side = Ui.dp(railUi ? 22 : 20);
+            hero.setPadding(side, Ui.dp(railUi ? 0 : 6), side, 0);
+
+            LinearLayout top = new LinearLayout(c);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout texts = new LinearLayout(c);
+            texts.setOrientation(LinearLayout.VERTICAL);
+            TextView titleTv = Ui.text(c, "뷰어", railUi ? 34f : 36f, Ui.bold, Ui.text());
+            titleTv.setTag("welcome-title");
+            titleTv.setLetterSpacing(-0.02f);
+            texts.addView(titleTv);
+            TextView subTv = Ui.text(c, "표시하고 편집할\n문서를 선택합니다.", 15.5f, Ui.regular, Ui.text2());
+            subTv.setSingleLine(false);
+            subTv.setLineSpacing(0, 1.08f);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            slp.topMargin = Ui.dp(4);
+            texts.addView(subTv, slp);
+            top.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            // the app's own icon (never redrawn — assets/icon.png) in a glass lens ring
+            int ring = Ui.dp(railUi ? 104 : 112);
             FrameLayout iconFrame = new FrameLayout(c);
-            iconFrame.setBackground(Ui.round(Ui.alpha(Ui.ACCENT, Ui.dark ? 0.16f : 0.10f), 22));
+            GradientDrawable lens = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                    new int[]{Ui.dark ? 0x40FFFFFF : 0xF2FFFFFF, Ui.dark ? 0x14FFFFFF : 0x99FFFFFF});
+            lens.setShape(GradientDrawable.OVAL);
+            lens.setStroke(Math.max(1, Ui.dp(1.2f)), Ui.dark ? 0x40FFFFFF : 0x1F000000);
+            iconFrame.setBackground(lens);
+            iconFrame.setElevation(Ui.dpf(8));
             ImageView iconView = new ImageView(c);
             iconView.setTag("welcome-icon");
             iconView.setScaleType(ImageView.ScaleType.FIT_CENTER);
             Bitmap ic = appIcon(c);
             if (ic != null) iconView.setImageBitmap(ic);
             else iconView.setImageDrawable(VectorIcons.create(c, "folder", 36f, Ui.ACCENT));
-            iconFrame.addView(iconView, new FrameLayout.LayoutParams(Ui.dp(60), Ui.dp(60), Gravity.CENTER));
-            card.addView(iconFrame, new LinearLayout.LayoutParams(Ui.dp(76), Ui.dp(76)));
+            iconFrame.addView(iconView, new FrameLayout.LayoutParams((int) (ring * 0.66f), (int) (ring * 0.66f), Gravity.CENTER));
+            Ui.press(iconFrame, 0.95f);
+            iconFrame.setOnClickListener(v -> main.launchSystemFilePicker());
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(ring, ring);
+            ilp.leftMargin = Ui.dp(10);
+            top.addView(iconFrame, ilp);
+            hero.addView(top, Widgets.MW);
 
-            TextView titleTv = Ui.text(c, "뷰어", 21f, Ui.bold, Ui.text());
-            titleTv.setTag("welcome-title");
-            titleTv.setGravity(Gravity.CENTER);
-            titleTv.setLetterSpacing(-0.02f);
-            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            tlp.topMargin = Ui.dp(12);
-            card.addView(titleTv, tlp);
-
-            TextView subTv = Ui.text(c, "이미지 · PDF · 문서 · 미디어를 한 곳에서 보고 편집하세요", 13.5f, Ui.regular, Ui.text2());
-            subTv.setSingleLine(false);
-            subTv.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            slp.topMargin = Ui.dp(4);
-            slp.bottomMargin = Ui.dp(18);
-            card.addView(subTv, slp);
-
-            // Primary action buttons (responsive wrap / row, >= 48dp touch height, zero ellipsis)
             LinearLayout actions = new LinearLayout(c);
             actions.setTag("welcome-actions");
             actions.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            alp.topMargin = Ui.dp(railUi ? 18 : 22);
+            TextView newBtn = glassButton(c, "새로운 문서", v -> main.createBlankSketch());
+            newBtn.setTag("welcome-new");
+            LinearLayout.LayoutParams b1 = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(50));
+            b1.bottomMargin = Ui.dp(10);
+            actions.addView(newBtn, b1);
+            TextView scanBtn = glassButton(c, "문서 스캔", v -> main.launchCameraCapture());
+            scanBtn.setTag("welcome-scan");
+            actions.addView(scanBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(50)));
+            hero.addView(actions, alp);
+            return hero;
+        }
+    }
 
-            TextView openBtn = actionPill(c, "파일 열기", true, v -> main.launchSystemFilePicker());
-            openBtn.setTag("welcome-open");
-            LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(50));
-            olp.bottomMargin = Ui.dp(10);
-            actions.addView(openBtn, olp);
+    /** Frosted capsule button (home screen). */
+    static TextView glassButton(Context c, String label, View.OnClickListener click) {
+        TextView tv = Ui.text(c, label, 15.5f, Ui.medium, Ui.text());
+        tv.setGravity(Gravity.CENTER);
+        tv.setSingleLine(true);
+        tv.setMinHeight(Ui.dp(48));
+        GradientDrawable bg = Ui.round(Ui.dark ? 0x26FFFFFF : 0xB3FFFFFF, 100);
+        bg.setStroke(Math.max(1, Ui.dp(0.8f)), Ui.dark ? 0x2EFFFFFF : 0x14000000);
+        tv.setBackground(bg);
+        tv.setElevation(Ui.dpf(1.5f));
+        tv.setOnClickListener(click);
+        Ui.press(tv, 0.97f);
+        return tv;
+    }
 
-            LinearLayout row2 = new LinearLayout(c);
-            row2.setOrientation(LinearLayout.HORIZONTAL);
-            TextView pasteBtn = actionPill(c, "붙여넣기", false, v -> main.pasteClipboardImage());
-            pasteBtn.setTag("welcome-paste");
-            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(0, Ui.dp(48), 1f);
-            plp.rightMargin = Ui.dp(8);
-            row2.addView(pasteBtn, plp);
+    /**
+     * Rounded "최근 항목"-style card: title row with a small glass button pill (grid / more / search), then a
+     * thumbnail grid (or list) of files. Used by 최근 항목 and 공유됨.
+     */
+    static LinearLayout recentCard(MainActivity m, String title, List<File> files, int cols, boolean list, int[] buttons) {
+        Context c = m;
+        LinearLayout card = new LinearLayout(c);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(Ui.dp(16), Ui.dp(14), Ui.dp(16), Ui.dp(20));
+        GradientDrawable bg = Ui.round(Ui.dark ? 0xFF1C1C1F : 0xF7FFFFFF, 26);
+        bg.setStroke(Math.max(1, Ui.dp(0.7f)), Ui.dark ? 0x1FFFFFFF : 0x0F000000);
+        card.setBackground(bg);
+        card.setElevation(Ui.dpf(Ui.dark ? 1f : 2f));
 
-            TextView capBtn = actionPill(c, "화면 캡처", false, v -> main.launchScreenCapture());
-            capBtn.setTag("welcome-capture");
-            row2.addView(capBtn, new LinearLayout.LayoutParams(0, Ui.dp(48), 1f));
-            actions.addView(row2, Widgets.MW);
-
-            card.addView(actions, Widgets.MW);
-
-            int maxCardW = Math.min(Ui.dp(520), Math.max(Ui.dp(260), Ui.screenW - main.sideInset() - Ui.dp(32)));
-            if (main.foldBounds != null && main.foldBounds.height() > main.foldBounds.width()) {
-                int leftPane = main.foldBounds.left - Ui.dp(28);
-                int rightPane = Ui.screenW - main.sideInset() - main.foldBounds.right - Ui.dp(28);
-                int pane = leftPane >= rightPane ? leftPane : rightPane;
-                if (pane > Ui.dp(180)) maxCardW = Math.min(maxCardW, pane);
+        LinearLayout head = new LinearLayout(c);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView t = Ui.text(c, title, 15f, Ui.semibold, Ui.text());
+        head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (buttons != null && buttons.length > 0) {
+            LinearLayout pill = new LinearLayout(c);
+            pill.setOrientation(LinearLayout.HORIZONTAL);
+            pill.setGravity(Gravity.CENTER_VERTICAL);
+            pill.setPadding(Ui.dp(4), 0, Ui.dp(4), 0);
+            GradientDrawable pbg = Ui.round(Ui.dark ? 0x1FFFFFFF : 0xE6FFFFFF, 100);
+            pbg.setStroke(Math.max(1, Ui.dp(0.8f)), Ui.dark ? 0x2EFFFFFF : 0x17000000);
+            pill.setBackground(pbg);
+            pill.setElevation(Ui.dpf(2));
+            for (int ic : buttons) {
+                Icons.IconView iv = new Icons.IconView(c, ic, 20, Ui.text());
+                iv.setTag("card-btn-" + ic);
+                iv.setOnClickListener(v -> {
+                    RectF a = Glass.absRect(v);
+                    if (ic == Icons.GRID) { if (m.homePageRef() != null) m.homePageRef().toggleLayout(); }
+                    else if (ic == Icons.MORE) m.showOverflowGlassMenu(a);
+                    else if (ic == Icons.SEARCH) m.onSearch();
+                });
+                Ui.press(iv, 0.88f);
+                pill.addView(iv, new LinearLayout.LayoutParams(Ui.dp(42), Ui.dp(40)));
             }
-            heroWrap.addView(card, new LinearLayout.LayoutParams(maxCardW, ViewGroup.LayoutParams.WRAP_CONTENT));
-            content.addView(heroWrap, Widgets.MW);
+            head.addView(pill, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, Ui.dp(40)));
+        }
+        card.addView(head, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(44)));
 
-            // Quick workspace tools group
-            Widgets.Group quick = new Widgets.Group(c, "빠른 도구");
-            quick.row(Icons.FOLDER, 0xFF0381FE, "폴더 열기", "저장소 탐색", true, v -> main.chooseFolder());
-            quick.row(Icons.SKETCH, 0xFF7B61FF, "새 스케치 만들기", "빈 캔버스", true, v -> main.createBlankSketch());
-            quick.row(Icons.CAMERA, 0xFF0FB59D, "사진 촬영 후 열기", null, true, v -> main.launchCameraCapture());
-            quick.row(Icons.OPEN_FILE, 0xFFF26D21, "예제 파일 체험", "이미지·문서·PDF", true, v -> main.openSampleFiles());
-            content.addView(quick, Widgets.MW);
+        LinearLayout grid = new LinearLayout(c);
+        grid.setTag("recent-grid");
+        grid.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        glp.topMargin = Ui.dp(16);
+        card.addView(grid, glp);
+        if (files.isEmpty()) {
+            TextView e = Ui.text(c, "항목 없음", 15f, Ui.semibold, Ui.text2());
+            e.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            elp.topMargin = Ui.dp(48);
+            grid.addView(e, elp);
+            return card;
+        }
+        int limit = Math.min(files.size(), 60);
+        if (list) {
+            for (int i = 0; i < limit; i++) grid.addView(fileRow(m, files.get(i)), Widgets.MW);
+            return card;
+        }
+        LinearLayout row = null;
+        for (int i = 0; i < limit; i++) {
+            if (i % cols == 0) {
+                row = new LinearLayout(c);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setBaselineAligned(false);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                rlp.bottomMargin = Ui.dp(18);
+                grid.addView(row, rlp);
+            }
+            row.addView(fileTile(m, files.get(i)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        }
+        int rest = limit % cols;
+        if (rest != 0 && row != null) for (int i = rest; i < cols; i++) row.addView(new View(c), new LinearLayout.LayoutParams(0, 1, 1f));
+        return card;
+    }
 
-            // Recent / Workspace files
-            List<File> recents = main.collectRecentFiles();
-            if (!recents.isEmpty()) {
-                Widgets.Group rec = new Widgets.Group(c, "최근 파일");
-                int limit = Math.min(recents.size(), wide ? 8 : 6);
-                for (int i = 0; i < limit; i++) {
-                    final File f = recents.get(i);
-                    String kind = FileOps.kindOf(f.getName());
-                    rec.row(iconForKind(kind), colorForKind(kind), f.getName(),
-                            labelForKind(kind) + " · " + MainActivity.fmtBytes(f.length()),
-                            true, v -> main.openFileAtPath(f.getAbsolutePath()));
+    private static final java.util.concurrent.ExecutorService THUMBS = java.util.concurrent.Executors.newFixedThreadPool(2);
+    private static final android.util.LruCache<String, Bitmap> THUMB_CACHE = new android.util.LruCache<>(64);
+
+    private static String baseName(String n) {
+        int d = n.lastIndexOf('.');
+        return d > 0 ? n.substring(0, d) : n;
+    }
+
+    private static String dateOf(File f) {
+        return new java.text.SimpleDateFormat("yyyy. M. d.", Locale.KOREA).format(new java.util.Date(f.lastModified()));
+    }
+
+    /** Thumbnail (pictures: the picture; other files: a paper sheet with the kind's mark), name, date, size. */
+    static View fileTile(MainActivity m, File f) {
+        Context c = m;
+        LinearLayout tile = new LinearLayout(c);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(Gravity.CENTER_HORIZONTAL);
+        tile.setPadding(Ui.dp(4), Ui.dp(2), Ui.dp(4), Ui.dp(2));
+        String kind = FileOps.kindOf(f.getName());
+        View thumb = thumbView(c, f, kind);
+        tile.addView(thumb, new LinearLayout.LayoutParams(Ui.dp(84), Ui.dp(84)));
+        TextView name = Ui.text(c, baseName(f.getName()), 13f, Ui.medium, Ui.text());
+        name.setGravity(Gravity.CENTER);
+        name.setMaxLines(2);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nlp.topMargin = Ui.dp(6);
+        tile.addView(name, nlp);
+        TextView meta = Ui.text(c, dateOf(f) + "\n" + MainActivity.fmtBytes(f.length()), 11.5f, Ui.regular, Ui.text2());
+        meta.setGravity(Gravity.CENTER);
+        meta.setSingleLine(false);
+        meta.setLineSpacing(0, 1.05f);
+        tile.addView(meta, Widgets.MW);
+        tile.setOnClickListener(v -> m.openFileAtPath(f.getAbsolutePath()));
+        Ui.press(tile, 0.95f);
+        return tile;
+    }
+
+    static View fileRow(MainActivity m, File f) {
+        Context c = m;
+        LinearLayout r = new LinearLayout(c);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(0, Ui.dp(6), 0, Ui.dp(6));
+        r.addView(thumbView(c, f, FileOps.kindOf(f.getName())), new LinearLayout.LayoutParams(Ui.dp(44), Ui.dp(44)));
+        LinearLayout texts = new LinearLayout(c);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.setPadding(Ui.dp(12), 0, 0, 0);
+        TextView name = Ui.text(c, baseName(f.getName()), 15f, Ui.medium, Ui.text());
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(name);
+        texts.addView(Ui.text(c, dateOf(f) + " · " + MainActivity.fmtBytes(f.length()), 12f, Ui.regular, Ui.text2()));
+        r.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        r.setOnClickListener(v -> m.openFileAtPath(f.getAbsolutePath()));
+        Ui.press(r, 0.98f);
+        return r;
+    }
+
+    private static View thumbView(Context c, File f, String kind) {
+        FrameLayout box = new FrameLayout(c);
+        if ("image".equals(kind)) {
+            ImageView iv = new ImageView(c);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            box.addView(iv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            String key = f.getAbsolutePath() + "@" + f.lastModified();
+            Bitmap cached = THUMB_CACHE.get(key);
+            if (cached != null) iv.setImageBitmap(cached);
+            else {
+                iv.setImageDrawable(paperSheet(c, "IMG"));
+                THUMBS.execute(() -> {
+                    Bitmap b = decodeThumb(f, Ui.dp(96));
+                    if (b == null) return;
+                    THUMB_CACHE.put(key, b);
+                    iv.post(() -> iv.setImageBitmap(b));
+                });
+            }
+            return box;
+        }
+        ImageView iv = new ImageView(c);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        String ext = f.getName().contains(".") ? f.getName().substring(f.getName().lastIndexOf('.') + 1).toUpperCase(Locale.ROOT) : labelForKind(kind);
+        iv.setImageDrawable(paperSheet(c, ext));
+        box.addView(iv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        return box;
+    }
+
+    private static Bitmap decodeThumb(File f, int target) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+            int s = 1;
+            while (o.outWidth / (s * 2) >= target && o.outHeight / (s * 2) >= target) s *= 2;
+            BitmapFactory.Options o2 = new BitmapFactory.Options();
+            o2.inSampleSize = s;
+            return BitmapFactory.decodeFile(f.getAbsolutePath(), o2);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** A small paper sheet with a folded corner and the file type underneath (document thumbnails). */
+    private static android.graphics.drawable.Drawable paperSheet(Context c, String label) {
+        return new android.graphics.drawable.Drawable() {
+            final android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            @Override public void draw(android.graphics.Canvas cv) {
+                android.graphics.Rect b = getBounds();
+                float h = b.height() * 0.92f, w = h * 0.76f;
+                float l = b.centerX() - w / 2f, t = b.top + (b.height() - h) / 2f, fold = w * 0.26f;
+                android.graphics.Path path = new android.graphics.Path();
+                path.moveTo(l, t); path.lineTo(l + w - fold, t); path.lineTo(l + w, t + fold); path.lineTo(l + w, t + h); path.lineTo(l, t + h); path.close();
+                p.setStyle(android.graphics.Paint.Style.FILL);
+                p.setColor(Ui.dark ? 0xFF2C2C30 : 0xFFF4F4F6);
+                p.setShadowLayer(Ui.dpf(2), 0, Ui.dpf(1), 0x22000000);
+                cv.drawPath(path, p);
+                p.clearShadowLayer();
+                p.setColor(Ui.dark ? 0xFF3A3A3F : 0xFFDCDCE0);
+                android.graphics.Path f = new android.graphics.Path();
+                f.moveTo(l + w - fold, t); f.lineTo(l + w - fold, t + fold); f.lineTo(l + w, t + fold); f.close();
+                cv.drawPath(f, p);
+                p.setColor(Ui.dark ? 0xFF55555C : 0xFFB9B9C0);
+                float lx = l + w * 0.2f, lw = w * 0.6f;
+                for (int i = 0; i < 4; i++) {
+                    float y = t + h * (0.34f + i * 0.09f);
+                    cv.drawRoundRect(lx, y, lx + (i == 3 ? lw * 0.6f : lw), y + Ui.dpf(1.6f), Ui.dpf(1), Ui.dpf(1), p);
                 }
-                content.addView(rec, Widgets.MW);
+                p.setColor(Ui.dark ? 0xFF8E8E93 : 0xFF8E8E93);
+                p.setTextAlign(android.graphics.Paint.Align.CENTER);
+                p.setTypeface(Ui.semibold);
+                p.setTextSize(Ui.sp(7.5f));
+                String lb = label.length() > 5 ? label.substring(0, 5) : label;
+                cv.drawText(lb, l + w / 2f, t + h - Ui.dpf(6), p);
             }
+            @Override public void setAlpha(int a) {}
+            @Override public void setColorFilter(android.graphics.ColorFilter cf) {}
+            @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+        };
+    }
 
-            // Supported formats info caption
-            content.addView(Widgets.caption(c,
-                    "지원 형식: PNG · JPG · WebP · GIF · TIFF · BMP · ICO · PDF · DOCX · HWPX · XLSX · PPTX · HWP · TXT · CSV · MP4 · MP3"));
+    // =========================================================================
+    // 1b. 공유됨: files other apps sent or opened with the viewer.
+    // =========================================================================
+    static final class SharedPage extends Page {
+        SharedPage(MainActivity m) {
+            super(m, "공유됨", true);
+            headerIcons = new int[0];
+            setGrouped(true);
         }
 
-        private void applyFoldAvoidance(LinearLayout wrap) {
-            Rect fb = main.foldBounds;
-            if (fb == null || fb.height() <= fb.width()) return;
-            int availW = Ui.screenW - main.sideInset();
-            int leftW = fb.left;
-            int rightW = Math.max(0, availW - fb.right);
-            if (leftW >= rightW) {
-                wrap.setGravity(Gravity.START);
-                wrap.setPadding(Ui.dp(16), Ui.dp(6), Math.max(Ui.dp(16), availW - fb.left + Ui.dp(12)), Ui.dp(8));
-            } else {
-                wrap.setGravity(Gravity.END);
-                wrap.setPadding(fb.right + Ui.dp(12), Ui.dp(6), Ui.dp(16), Ui.dp(8));
-            }
-        }
-
-        private TextView actionPill(Context c, String label, boolean primary, View.OnClickListener click) {
-            TextView tv = Ui.text(c, label, 15f, Ui.semibold, primary ? 0xFFFFFFFF : Ui.text());
-            tv.setGravity(Gravity.CENTER);
-            tv.setPadding(Ui.dp(14), 0, Ui.dp(14), 0);
-            tv.setMinHeight(Ui.dp(48));
-            GradientDrawable bg = Ui.round(primary ? Ui.ACCENT : Ui.chip(), 100);
-            if (!primary) bg.setStroke(Math.max(1, Ui.dp(0.75f)), Ui.dark ? 0x26FFFFFF : 0x14000000);
-            tv.setBackground(bg);
-            tv.setOnClickListener(click);
-            Ui.press(tv, 0.96f);
-            return tv;
+        @Override void build() {
+            Context c = getContext();
+            List<File> files = new ArrayList<>();
+            File dir = main.sharedDir();
+            File[] fs = dir == null ? null : dir.listFiles();
+            if (fs != null) for (File f : fs) if (f.isFile() && !f.getName().startsWith(".") && !FileOps.kindOf(f.getName()).isEmpty()) files.add(f);
+            java.util.Collections.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+            boolean railUi = main.sideInset() > 0;
+            LinearLayout card = recentCard(main, "다른 앱에서 받은 항목", files, railUi || main.tabletUi() ? 5 : 3, false, null);
+            card.setTag("shared-card");
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            clp.setMargins(Ui.dp(14), Ui.dp(8), Ui.dp(14), 0);
+            content.addView(card, clp);
+            content.addView(Widgets.caption(c, "다른 앱에서 '공유' 또는 '열기'로 보낸 파일이 여기에 모입니다."));
         }
     }
 
@@ -287,20 +525,44 @@ final class Pages {
             addView(subToolHost, flp);
         }
 
+        /** The markup palette sits at the bottom (above the document's tool capsules); other tool bars at the top. */
+        boolean subAtBottom;
+
+        void setSubAtBottom(boolean b) {
+            if (b == subAtBottom) return;
+            subAtBottom = b;
+            LayoutParams lp = (LayoutParams) subToolHost.getLayoutParams();
+            lp.gravity = (b ? Gravity.BOTTOM : Gravity.TOP) | Gravity.CENTER_HORIZONTAL;
+            subToolHost.setLayoutParams(lp);
+            applyInsets();
+        }
+
         @Override void applyInsets() {
             int topSafe = Ui.statusInset + Ui.dp(68);
             int botSafe = main.bottomPadding();
             int rightSafe = main.sideInset();
+            if (subToolHost != null && subAtBottom) {
+                LayoutParams lp = (LayoutParams) subToolHost.getLayoutParams();
+                int wantB = rightSafe > 0 ? Ui.navInset + Ui.dp(18) : botSafe - Ui.dp(4);
+                if (lp != null && (lp.bottomMargin != wantB || lp.rightMargin != Ui.dp(14) + rightSafe || lp.topMargin != 0)) {
+                    lp.topMargin = 0;
+                    lp.bottomMargin = wantB;
+                    lp.leftMargin = Ui.dp(14);
+                    lp.rightMargin = Ui.dp(14) + rightSafe;
+                    subToolHost.setLayoutParams(lp);
+                }
+            }
             if (emptyOverlay != null) {
                 int pL = Ui.dp(28), pT = topSafe + Ui.dp(16), pR = Ui.dp(28) + rightSafe, pB = botSafe + Ui.dp(16);
                 if (emptyOverlay.getPaddingTop() != pT || emptyOverlay.getPaddingRight() != pR || emptyOverlay.getPaddingBottom() != pB) {
                     emptyOverlay.setPadding(pL, pT, pR, pB);
                 }
             }
-            if (subToolHost != null) {
+            if (subToolHost != null && !subAtBottom) {
                 LayoutParams lp = (LayoutParams) subToolHost.getLayoutParams();
                 int wantR = Ui.dp(14) + rightSafe;
-                if (lp != null && (lp.topMargin != topSafe || lp.rightMargin != wantR)) {
+                if (lp != null && (lp.topMargin != topSafe || lp.rightMargin != wantR || lp.bottomMargin != 0)) {
+                    lp.bottomMargin = 0;
                     lp.topMargin = topSafe;
                     lp.leftMargin = Ui.dp(14);
                     lp.rightMargin = wantR;
@@ -308,7 +570,7 @@ final class Pages {
                 }
             }
             if (main.nativeDocView != null) {
-                int extraSub = (subToolHost != null && subToolHost.getVisibility() == VISIBLE) ? Ui.dp(50) : 0;
+                int extraSub = (subToolHost != null && subToolHost.getVisibility() == VISIBLE && !subAtBottom) ? Ui.dp(50) : 0;
                 main.nativeDocView.setSafeInsets(topSafe + extraSub, botSafe, rightSafe);
             }
             if (main.nativeMediaView != null) {
@@ -331,7 +593,7 @@ final class Pages {
         private LinearLayout listHost;
 
         FilesPage(MainActivity m) {
-            super(m, "목록", true);
+            super(m, "둘러보기", true);
             headerIcons = new int[]{Icons.FOLDER, Icons.SORT};
             setGrouped(true);
         }
